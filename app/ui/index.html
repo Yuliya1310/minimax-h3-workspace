@@ -6,6 +6,12 @@
 <title>Minimax H3 Workspace</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<script>
+// the saved theme has to be on <html> before the first style is computed, otherwise the window starts red
+try { const t = localStorage.getItem('h3-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}
+// the window stays empty until the app has opened the section the user was in: no flash of the video page
+setTimeout(() => document.documentElement.classList.add('booted'), 1500);
+</script>
 <style>
 :root{
   --bg:#12070a;
@@ -161,7 +167,7 @@
 .cw-wide textarea{min-height:110px}
 .qw-slots{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .qw-slots.one{grid-template-columns:1fr}
-.qw-slots .drop{height:130px}
+.qw-slots .drop{height:var(--qw-h,130px)}
 .qw-slots .drop .ph svg{width:24px;height:24px}
 .cw-media{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
 .cw-file{display:grid;gap:3px;justify-items:center;text-align:center;padding:8px;border:1.5px dashed var(--line-2);border-radius:14px;background:var(--bg-2);cursor:pointer;transition:.15s}
@@ -188,9 +194,32 @@
 .themes button{width:22px;height:22px;border-radius:50%;border:2px solid var(--line-2);transition:.15s;padding:0}
 .themes button:hover{transform:scale(1.15)}
 .themes button.on{border-color:var(--text);box-shadow:0 0 0 2px var(--surface)}
+/* settings: the theme palette and the interface size live here instead of the sidebar */
+.set-wrap{display:grid;gap:16px;max-width:860px}
+.set-row{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:12px 0}
+.set-row+.set-row{border-top:1px solid var(--line)}
+.set-lbl b{display:block;font-size:13.5px;font-weight:700}
+.set-lbl small{display:block;margin-top:3px;font-size:12px;color:var(--dim)}
+.set-acts{display:flex;align-items:center;gap:12px;padding-top:12px;border-top:1px solid var(--line)}
+.themes-set{padding:0;gap:10px}
+.themes-set button{width:30px;height:30px}
+.themes-set button.on{box-shadow:0 0 0 2px var(--surface),0 0 0 4px rgba(var(--accent-rgb),.5)}
 *{box-sizing:border-box;margin:0;padding:0}
 [hidden]{display:none!important}
-html,body{height:100%}
+/* the layout is invisible for the first milliseconds: the app sets .booted once the saved section is opened */
+html:not(.booted) .app{visibility:hidden}
+/* while the window is still hidden nothing animates: otherwise the default red theme fades into the saved one,
+   and the video item's highlight fades out, exactly as the window appears */
+html:not(.booted) *{transition:none!important;animation:none!important}
+/* one look for every scrollbar: slim, with a line-coloured thumb. The standard properties are inherited,
+   so the page scrollbar, the sidebar, the chat list and the settings column all match */
+html{scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:99px}
+::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+/* the window itself never scrolls: .main is the only scroll container (no second scrollbar at the window edge) */
+html,body{height:100%;overflow:hidden}
 body{
   background:
     radial-gradient(1200px 600px at 85% -10%,rgba(var(--accent-rgb),var(--glow)),transparent 60%),
@@ -202,34 +231,63 @@ body{
 button,input,select,textarea{font:inherit;color:inherit}
 button{cursor:pointer;border:0;background:none}
 
+/* the sidebar can be dragged wider or narrower and hidden altogether: --sbw is its width in pixels */
 :root{--sbw:248px}
-.app{display:grid;grid-template-columns:var(--sbw) 1fr;height:calc(var(--vh,1vh)*100)}
-.app.nosb{grid-template-columns:1fr}.app.nosb .side{display:none}
-.main .view{padding-top:56px}   /* room for the menu button, it must not cover the title */
-#sbToggle{position:fixed;left:calc(var(--sbw,248px) + 8px);top:10px;z-index:35;height:34px;min-width:34px;padding:0 10px;border-radius:10px;border:1px solid var(--line-2);background:var(--surface);color:var(--text);font-weight:700;font-size:13px;cursor:pointer;opacity:.85}
-#sbRs{position:fixed;top:0;bottom:0;left:calc(var(--sbw,248px) - 4px);width:9px;z-index:34;cursor:col-resize}
-#sbRs::after{content:'';position:absolute;left:4px;top:0;bottom:0;width:2px;background:transparent;transition:.15s}
-#sbRs:hover::after,body.sb-drag #sbRs::after{background:var(--accent,#c0405a)}
+.app{display:grid;grid-template-columns:var(--sbw,248px) minmax(0,1fr);grid-template-rows:auto minmax(0,1fr);height:100%}
+.app.nosb{grid-template-columns:minmax(0,1fr)}
+.app.nosb .side{display:none}
 body.sb-drag{user-select:none;cursor:col-resize}
-body.nosb-on #sbRs{display:none}
+
+/* one header for the whole window: brand + section title, and the pinned bar of all sections under them */
+.topbar{grid-column:1/-1;grid-row:1;display:grid;grid-template-columns:var(--sbw,248px) minmax(0,1fr);grid-template-rows:auto auto;align-items:center;border-bottom:1px solid var(--line);background:rgba(var(--bg2-rgb),.86);backdrop-filter:blur(14px);z-index:20}
+.topbar .brand{padding:8px 12px;gap:8px}
+.topbar .brand-name{line-height:1.2}
+.topbar .brand-sub{font-size:11px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topbar .brand>div:last-child{min-width:0}
+.tb-head{min-width:0;padding:9px clamp(20px,2.2vw,44px) 9px 56px}
+.tb-head .head{display:flex;align-items:center;justify-content:space-between;gap:24px;width:100%;margin:0;padding:0}
+.tb-head .head>div{min-width:0}
+.tb-head .head>div:first-child{flex:1 1 auto}
+.tb-head .head>button,.tb-head .head>.mode-pill{flex:none}
+.tb-head .head .head-acts{flex:none;flex-wrap:nowrap}
+.tb-head .head h1{font-size:23px;line-height:1.2}
+.tb-head .head p{margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the Home page keeps its own title block, but in the top bar it looks like every other section */
+.tb-head .pr-head{width:100%;margin:0;text-align:left}
+.tb-head .pr-head h1{margin:0;font-size:23px;line-height:1.2}
+.tb-head .pr-head p{margin-top:2px;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.app.nosb .topbar{grid-template-columns:minmax(0,1fr)}
+.app.nosb .topbar .brand{display:none}
+.app.nosb .tb-head{padding-left:56px}
+
+/* the menu button floats at the left edge of the header; the thin line on the sidebar edge changes its width */
+#sbToggle{position:fixed;left:calc(var(--sbw,248px) + 8px);top:14px;z-index:36;width:30px;height:30px;padding:0;border-radius:9px;border:1px solid var(--line-2);background:var(--surface);color:var(--text);font-weight:800;font-size:15px;line-height:1;cursor:pointer;opacity:.75;display:grid;place-items:center}
 #sbToggle:hover{opacity:1;border-color:var(--accent)}
+body.nosb-on #sbToggle{left:12px}
+#sbRs{position:fixed;top:0;bottom:0;left:calc(var(--sbw,248px) - 3px);width:7px;z-index:35;cursor:col-resize}
+#sbRs::after{content:'';position:absolute;left:3px;top:0;bottom:0;width:2px;background:transparent;transition:.15s}
+#sbRs:hover::after,body.sb-drag #sbRs::after{background:var(--accent,#c0405a)}
+body.nosb-on #sbRs{display:none}
+
 /* RunningHub cloud is switched off in the interface for now (not finished, would mislead) */
 .opt[data-opt="cloud"],#optCloudShow,#mdCloudBox{display:none!important}
 body.cloud-on #mdCloudBox{display:block!important}
-/* pinned bar of all sections (video, images): switch without going back to «Главная» */
-#modeBar{position:fixed;top:10px;left:calc(var(--sbw,248px) + 104px);right:300px;z-index:34;height:34px;display:flex;align-items:center;gap:4px;overflow-x:auto;white-space:nowrap;scrollbar-width:none}
+
+/* pinned bar of all video and image sections: switch without going back to «Главная» */
+#modeBar{grid-column:2;grid-row:2;display:flex;align-items:center;gap:4px;min-width:0;overflow-x:auto;white-space:nowrap;scrollbar-width:none;padding:0 clamp(20px,2.2vw,44px) 8px 56px}
+.app.nosb #modeBar{grid-column:1/-1}
 #modeBar::-webkit-scrollbar{display:none}
-body.nosb-on #modeBar{left:112px}
-#modeBar .mb{flex:none;display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:9px;border:1px solid var(--line-2);background:var(--surface);color:var(--text);font-size:12.5px;font-weight:600;cursor:pointer;opacity:.85}
-#modeBar .mb svg{width:15px;height:15px}
+#modeBar .mb{flex:none;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border-radius:8px;border:1px solid var(--line-2);background:var(--surface);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;opacity:.85}
+#modeBar .mb svg{width:14px;height:14px}
 #modeBar .mb:hover{opacity:1;border-color:var(--accent)}
 #modeBar .mb.on{opacity:1;border-color:var(--accent);background:var(--accent-soft,var(--surface-2));color:var(--accent)}
-#modeBar .mb-sep{flex:none;width:1px;height:18px;background:var(--line-2);margin:0 4px}
+#modeBar .mb-sep{flex:none;width:1px;height:16px;background:var(--line-2);margin:0 3px}
 @media (max-width:1000px){#modeBar{display:none}}
-.app.nosb ~ #sbToggle,body.nosb-on #sbToggle{left:12px}
 
 /* sidebar */
-.side{background:rgba(var(--bg2-rgb),.7);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:20px 14px;gap:6px;backdrop-filter:blur(12px);overflow-y:auto;min-height:0}
+.side{background:rgba(var(--bg2-rgb),.7);border-right:1px solid var(--line);display:flex;flex-direction:column;backdrop-filter:blur(12px);overflow:hidden;min-height:0}
+/* the navigation scrolls on its own; the computer panel under it never leaves the screen */
+.side-scroll{display:flex;flex-direction:column;gap:6px;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:20px 14px 8px}
 .brand{display:flex;align-items:center;gap:12px;padding:4px 8px 22px}
 .brand-mark{width:38px;height:38px;border-radius:12px;background:var(--grad);display:grid;place-items:center;box-shadow:0 8px 24px rgba(var(--accent-rgb),.35)}
 .brand-name{font-weight:800;font-size:17px;letter-spacing:-.01em}
@@ -252,7 +310,17 @@ body.nosb-on #modeBar{left:112px}
 .nav .badge{margin-left:auto;font-size:10.5px;padding:2px 7px;border-radius:99px;background:var(--surface-2);color:var(--dim);font-weight:700}
 .nav[disabled]{opacity:.55;cursor:default}
 .nav[disabled]:hover{background:none;color:var(--muted)}
-.side-foot{margin-top:auto;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:13px 14px;display:grid;gap:8px}
+.side-foot{margin:6px 14px 14px;flex:none;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:11px 13px;display:flex;flex-direction:column;gap:8px}
+.sf-head{display:flex;align-items:center;gap:7px;width:100%;padding:0;text-align:left;font-weight:700;font-size:12.5px;color:var(--muted)}
+.sf-head:hover{color:var(--text)}
+.sf-head .dot{margin:0;flex:none}
+.sf-mini{display:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:10.5px;font-weight:500;color:var(--dim)}
+.sf-chev{width:14px;height:14px;flex:none;margin-left:auto;opacity:.65;transition:transform .15s}
+.sf-body{display:grid;gap:8px}
+.side-foot.collapsed .sf-title{display:none}
+.side-foot.collapsed .sf-mini{display:block}
+.side-foot.collapsed .sf-body{display:none}
+.side-foot.collapsed .sf-chev{transform:rotate(-90deg)}
 .stat{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted)}
 .stat b{color:var(--text);font-weight:700}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(63,209,139,.18);margin-right:7px;vertical-align:1px}
@@ -263,20 +331,19 @@ body.nosb-on #modeBar{left:112px}
 .meter{display:grid;gap:5px}
 .side-foot .stat b{font-variant-numeric:tabular-nums}
 .side-foot .stat small{color:var(--dim);font-size:11px}
-.rep-btn{display:flex;align-items:center;justify-content:center;gap:8px;margin:0 0 12px;padding:9px 10px;border-radius:11px;border:1px solid rgba(var(--accent-rgb),.45);background:var(--accent-soft);color:var(--text);font-weight:700;font-size:12.5px;width:100%;transition:.15s;flex:none}
-.rep-btn svg{width:16px;height:16px}
-.rep-btn:hover{color:var(--text);border-color:var(--accent)}
-.rep-btn[disabled]{opacity:.6;cursor:default}
-.sup-btn{display:block;margin:-4px 0 12px;padding:4px 10px;width:100%;text-align:center;font-size:12px;color:var(--muted);font-weight:600;border-radius:9px;flex:none}
-.sup-btn:hover{color:var(--text)}
-@media (max-height:760px){.side-foot{gap:6px;padding:10px 12px}.side-foot .stat{font-size:11.5px}}
+@media (max-height:760px){.side-foot{gap:6px;padding:9px 11px}.side-foot .stat{font-size:11.5px}}
 
 /* main */
-.main{overflow:auto}
-.view{display:none;padding:28px clamp(20px,2.2vw,44px) 40px}
+/* scrollbar-gutter keeps the gutter reserved in every view, so the page width never jumps and the tray tab knows its width */
+.main{overflow:auto;scrollbar-gutter:stable;overscroll-behavior:contain}
+/* the agent page never scrolls, so it does not need the reserved gutter: its right column sits on the window edge */
+/* pages that fill the window never scroll, so they do not need the reserved gutter: their right side goes to the edge */
+body.fit-page .main{scrollbar-gutter:auto}
+.view{display:none;padding:22px clamp(20px,2.2vw,44px) 40px}
 .view.active{display:block;animation:fade .25s ease}
-@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
 .head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:22px}
+.head-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 h1{font-size:26px;font-weight:800;letter-spacing:-.02em}
 .head p{color:var(--muted);margin-top:4px}
 .mode-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:99px;background:var(--surface);border:1px solid var(--line-2);font-weight:700;font-size:13px;white-space:nowrap}
@@ -522,7 +589,7 @@ body.first-run .pr-first{display:flex}
 .pr-first b{display:block;font-size:15px;margin-bottom:3px}.pr-first span{font-size:13px;line-height:1.45;color:var(--mut,#9a8d93)}
 .pr-first .btn{flex:none;margin-left:auto}
 .nav.sub{display:none!important}
-.st-bar{position:relative;display:flex;justify-content:flex-end;gap:8px;margin:-40px 0 14px;height:34px;align-items:center}
+.st-bar{position:relative;display:flex;justify-content:flex-end;gap:8px;margin:0 0 14px;height:34px;align-items:center}
 .st-bar .btn{height:32px;padding:0 14px;font-size:12.5px;white-space:nowrap}
 .st-bar .st-save{background:var(--accent,#c0405a);border-color:var(--accent,#c0405a);color:#fff}
 .st-bar .st-list b{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 5px;margin:0 2px;border-radius:99px;background:rgba(255,255,255,.12);font-size:11px}
@@ -618,6 +685,12 @@ img.pr-media{object-position:center 38%}
 /* agent */
 :root{--aw:clamp(300px,24vw,480px)}
 .ag-grid{position:relative;display:grid;grid-template-columns:230px minmax(0,1fr) var(--aw);gap:16px;align-items:start}
+/* the agent view fills the window exactly: the three columns share its height and scroll inside themselves,
+   so no magic number for the header and no page scrollbar whatever the window size or zoom is */
+#view-agent.active{display:flex;flex-direction:column;height:100%;padding-right:0}
+#view-agent .ag-grid{flex:1;min-height:0;align-items:stretch}
+#view-agent .ag-hist,#view-agent .ag-chat,#view-agent .ag-side{height:auto;min-height:0}
+#view-agent .ag-side{padding-right:2px}
 .ag-grid .gresize{right:calc(var(--aw) - 3px)}
 .ag-hist{display:flex;flex-direction:column;gap:10px;height:calc(calc(var(--vh,1vh)*100) - 150px);min-height:480px;padding:12px}
 .ag-hlist{flex:1;overflow:auto;display:flex;flex-direction:column;gap:4px}
@@ -632,6 +705,8 @@ img.pr-media{object-position:center 38%}
 .ag-h button:hover{background:var(--accent)!important}
 .ag-hempty{font-size:12px;color:var(--dim);text-align:center;padding:20px 6px}
 .ag-chat{display:flex;flex-direction:column;height:calc(calc(var(--vh,1vh)*100) - 150px);min-height:480px;padding:0;overflow:hidden}
+/* the right column of the agent is as tall as the chat and scrolls on its own, so the page itself never moves */
+.ag-side{height:calc(calc(var(--vh,1vh)*100) - 150px);min-height:480px;overflow-y:auto;overscroll-behavior:contain;align-content:start;padding-right:6px}
 .ag-msgs{flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:14px}
 .ag-empty{margin:auto;display:grid;gap:8px;text-align:center;color:var(--muted);max-width:460px}
 .ag-empty b{color:var(--text);font-size:15px}
@@ -659,11 +734,14 @@ img.pr-media{object-position:center 38%}
 .ag-att img{height:56px;border-radius:8px;display:block}
 .ag-att b{position:absolute;left:4px;top:4px;font-size:10px;font-family:var(--mono);background:rgba(var(--ov-rgb),.8);padding:1px 5px;border-radius:5px}
 .ag-att button{position:absolute;right:-6px;top:-6px;width:20px;height:20px;border-radius:50%;background:var(--surface-2);font-size:11px}
+/* the field takes a whole row of its own; every button sits underneath it */
 .ag-comp{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:flex-end;padding:12px 18px 14px}
-.ag-comp textarea{order:-2;min-height:56px;max-height:180px;flex:1 1 0;min-width:0}
+.ag-comp textarea{order:-2;flex:1 1 100%;width:100%;min-height:56px;max-height:180px;min-width:0}
 .ag-comp #agSend{order:-1}
-.ag-comp .ag-clip,.ag-comp #agClear{padding:6px 10px;min-height:0;font-size:12.5px;border-radius:9px}
-.ag-comp .ag-clip svg{width:15px;height:15px}
+.ag-comp .ag-clip,.ag-comp #agClearIn,.ag-comp #agSend{height:38px;min-height:38px;border-radius:10px;font-size:13px}
+.ag-comp .ag-clip{padding:0 11px;min-width:44px}
+.ag-comp #agClearIn{padding:0 14px}
+.ag-comp .ag-clip svg{width:16px;height:16px}
 .ag-clip{padding:12px;display:grid;place-items:center}
 .ag-clip.rec{background:rgba(var(--accent-rgb),.25);border-color:var(--accent);color:#fff;animation:pulse 1s infinite}
 .ag-audio{margin:0 18px;padding:10px 12px;border-radius:12px;background:var(--bg-2);border:1px solid var(--line);display:grid;gap:6px}
@@ -680,8 +758,22 @@ img.pr-media{object-position:center 38%}
 .sk-top .x{width:24px;height:24px;border-radius:7px;background:var(--surface-2);font-size:11px}
 .sk p{font-size:11.5px;color:var(--dim);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .sk input{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:11.5px;outline:none;font-family:var(--mono)}
-@media (max-width:1300px){.ag-grid{grid-template-columns:200px minmax(0,1fr)}.ag-grid>.col{grid-column:1/-1}.ag-grid .gresize{display:none}}
-@media (max-width:900px){.ag-grid{grid-template-columns:1fr}.ag-chat,.ag-hist{height:auto}.ag-chat{height:calc(var(--vh,1vh)*70)}.ag-hlist{max-height:200px}}
+@media (max-width:1300px){
+  .ag-grid{grid-template-columns:200px minmax(0,1fr)}
+  .ag-grid>.col{grid-column:1/-1}
+  .ag-grid .gresize{display:none}
+  /* stacked: the columns no longer share one screen height, the page scrolls instead */
+  #view-agent.active{display:block;height:auto;padding-right:clamp(20px,2.2vw,44px)}
+  #view-agent .ag-grid{align-items:start}
+  #view-agent .ag-chat,#view-agent .ag-hist{height:calc(calc(var(--vh,1vh)*100) - 150px);min-height:480px}
+  .ag-side{height:auto;min-height:0;overflow:visible;padding-right:0}
+}
+@media (max-width:900px){
+  .ag-grid{grid-template-columns:1fr}
+  #view-agent .ag-chat,#view-agent .ag-hist{height:auto}
+  #view-agent .ag-chat{height:calc(var(--vh,1vh)*70)}
+  .ag-hlist{max-height:200px}
+}
 /* refs & action */
 /* reference videos / audios: small squares, video and audio side by side */
 .rm-media{display:flex;flex-wrap:wrap;gap:6px 28px;align-items:flex-start}
@@ -864,7 +956,12 @@ img.pr-media{object-position:center 38%}
 @media (max-width:1100px){.grid{grid-template-columns:1fr}.preview{position:static}.gresize{display:none}}
 @media (max-width:760px){
   .app{grid-template-columns:1fr}
+  .topbar{grid-template-columns:1fr}
+  .topbar .brand{display:none}
   .side{display:none}
+  /* the window is too narrow for a menu: the section title takes the whole header */
+  #sbToggle,#sbRs{display:none}
+  .tb-head{padding:9px 16px}
   .view{padding:20px 16px}
   .choose{grid-template-columns:1fr}
   .m{grid-template-columns:1fr}
@@ -876,32 +973,18 @@ img.pr-media{object-position:center 38%}
 <body>
 <div class="app">
 
-  <aside class="side">
+  <header class="topbar">
     <div class="brand">
       <div class="brand-mark">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M3 12h2M7 7v10M11 4v16M15 8v8M19 10v4M21 12h0"/></svg>
       </div>
       <div><div class="brand-name">Minimax H3</div><div class="brand-sub">Workspace · локальная генерация</div><div class="brand-sub" id="appVer" style="opacity:.75"></div></div>
     </div>
+    <div class="tb-head" id="tbHead"></div>
+  </header>
 
-    <button class="rep-btn" id="repBtn" title="Если что-то не работает, нажмите: приложение соберёт файл с данными о компьютере и ошибках. Отправьте этот файл автору.">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>
-      Отчёт для разработчика
-    </button>
-    <button class="sup-btn" id="supBtn" type="button" title="Программа бесплатная. Если она вам помогла, можно поддержать автора: откроется страница оплаты в браузере. Ничего вводить в самой программе не нужно.">♥ Поддержать проект</button>
-    <div class="zoom-btns" id="uiZoom" title="Размер интерфейса (или Ctrl + колесо мыши)" style="margin:0 0 8px 4px"><button class="btn" id="uiSm" type="button">А−</button><small id="uiPct">100%</small><button class="btn" id="uiLg" type="button">А+</button></div>
-    <div class="themes" id="themes" title="Тема оформления">
-      <button data-t="" style="background:#e8264f" title="Бордо"></button>
-      <button data-t="light" style="background:#f3f4f6" title="Светлая"></button>
-      <button data-t="gray" style="background:#b7bcc4" title="Серая"></button>
-      <button data-t="graphite" style="background:#272a30" title="Графит"></button>
-      <button data-t="night" style="background:#2fb5a8" title="Ночь"></button>
-      <button data-t="forest" style="background:#d4a24c" title="Лес"></button>
-    </div>
-    <button class="nav" data-view="models" title="Здесь выбирается, как работает программа: «Я новичок» или «У меня уже есть ComfyUI», а также модели и файлы">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
-      Настройки <span class="badge" id="modelsBadge" hidden></span><span class="starthere">Начните здесь</span>
-    </button>
+  <aside class="side">
+    <div class="side-scroll">
     <div class="nav-label">Создать</div>
     <button class="nav" data-view="presets">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg>
@@ -971,17 +1054,37 @@ img.pr-media{object-position:center 38%}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7"/></svg>
       Увеличение видео и фото
     </button>
+    <button class="nav" data-view="models" title="Здесь выбирается, как работает программа: «Я новичок» или «У меня уже есть ComfyUI», а также модели и файлы">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8 12 3 3 8l9 5 9-5Z"/><path d="m3 13 9 5 9-5M3 18l9 5 9-5" opacity=".5"/></svg>
+      Модели <span class="badge" id="modelsBadge" hidden></span><span class="starthere">Начните здесь</span>
+    </button>
 
-    <div class="side-foot" id="sysBox" title="Нагрузка компьютера, обновляется каждые 2 секунды">
-      <div class="stat"><span><span class="dot" id="engDot"></span>Движок</span><b id="engTxt">запущен</b></div>
-      <div class="stat"><span>Видеокарта</span><b id="gpuName">—</b></div>
-      <div class="meter"><div class="stat"><span>Нагрузка GPU</span><b id="gpuLoad">—</b></div><div class="vram"><i id="gpuBar"></i></div></div>
-      <div class="meter"><div class="stat"><span>Видеопамять</span><b id="vramTxt">—</b></div><div class="vram"><i id="vramBar"></i></div></div>
-      <div class="meter"><div class="stat"><span>Процессор</span><b id="cpuTxt">—</b></div><div class="vram"><i id="cpuBar"></i></div></div>
-      <div class="meter"><div class="stat"><span>Память (ОЗУ)</span><b id="ramTxt">—</b></div><div class="vram"><i id="ramBar"></i></div></div>
-      <div class="stat" id="tempRow" hidden><span>Температура GPU</span><b id="gpuTemp">—</b></div>
-      <div class="stat" id="powerRow" hidden><span>Питание GPU</span><b id="gpuPower">—</b></div>
-      <div class="stat"><span>Диск <small id="diskName"></small></span><b id="diskTxt">—</b></div>
+    <div class="nav-label">Программа</div>
+    <button class="nav" data-view="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"/></svg>
+      Настройки
+    </button>
+
+    </div><!-- /side-scroll -->
+
+    <div class="side-foot" id="sysBox">
+      <button class="sf-head" id="sfToggle" type="button" aria-expanded="true" aria-label="Нагрузка компьютера — свернуть или развернуть">
+        <span class="dot" id="engDot"></span>
+        <span class="sf-title">Компьютер</span>
+        <span class="sf-mini" id="sfMini">GPU —</span>
+        <svg class="sf-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+      <div class="sf-body">
+        <div class="stat"><span>Движок</span><b id="engTxt">запущен</b></div>
+        <div class="stat"><span>Видеокарта</span><b id="gpuName">—</b></div>
+        <div class="meter"><div class="stat"><span>Нагрузка GPU</span><b id="gpuLoad">—</b></div><div class="vram"><i id="gpuBar"></i></div></div>
+        <div class="meter"><div class="stat"><span>Видеопамять</span><b id="vramTxt">—</b></div><div class="vram"><i id="vramBar"></i></div></div>
+        <div class="meter"><div class="stat"><span>Процессор</span><b id="cpuTxt">—</b></div><div class="vram"><i id="cpuBar"></i></div></div>
+        <div class="meter"><div class="stat"><span>Память (ОЗУ)</span><b id="ramTxt">—</b></div><div class="vram"><i id="ramBar"></i></div></div>
+        <div class="stat" id="tempRow" hidden><span>Температура GPU</span><b id="gpuTemp">—</b></div>
+        <div class="stat" id="powerRow" hidden><span>Питание GPU</span><b id="gpuPower">—</b></div>
+        <div class="stat"><span>Диск <small id="diskName"></small></span><b id="diskTxt">—</b></div>
+      </div>
     </div>
   </aside>
 
@@ -1201,12 +1304,12 @@ img.pr-media{object-position:center 38%}
             <button class="btn ag-clip" type="button" id="agMic" title="Голосовой ввод: нажмите, говорите, нажмите ещё раз">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
             </button>
-            <button class="btn" type="button" id="agClear" title="Очистить поле ввода">Очистить</button>
+            <button class="btn" type="button" id="agClearIn" title="Очистить поле ввода">Очистить</button>
             <textarea id="agIn" rows="2" placeholder="Опишите сцену, сценарий или вставьте реплики… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
             <button class="btn pri" id="agSend">Отправить</button>
           </div>
         </div>
-        <div class="col">
+        <div class="col ag-side">
           <div class="card">
             <div class="card-h"><h3>Модель агента</h3><span class="verdict" id="agState" hidden></span></div>
             <div id="agBig" class="agbig"></div>
@@ -1286,13 +1389,13 @@ img.pr-media{object-position:center 38%}
 
     <!-- ============ OWN WORKFLOWS ============ -->
     <section class="view" id="view-custom">
-      <div style="margin-bottom:10px"><button class="btn" id="cwBack" type="button">← Настройки</button></div>
+      <div style="margin-bottom:10px"><button class="btn" id="cwBack" type="button">← Модели</button></div>
       <div class="head">
         <div>
           <h1>Свои workflow</h1>
           <p>Для тех, кто работает в ComfyUI. Загрузите свой workflow, и приложение покажет только нужные поля. Экспериментально, без гарантий</p>
         </div>
-        <span style="display:flex;gap:8px;flex-wrap:wrap">
+        <span class="head-acts">
           <select id="cwSel" style="min-width:200px"></select>
           <label class="btn pri" style="cursor:pointer">Добавить файл…<input type="file" id="cwFile" accept=".json,application/json" hidden></label>
           <button class="btn danger" id="cwDel" type="button" hidden>Удалить</button>
@@ -1429,7 +1532,7 @@ img.pr-media{object-position:center 38%}
             </div>
           </div>
           <div class="fld" data-for="new external">
-            <label>Что вы хотите делать? <span class="hint" id="modeHint">— отметьте только нужное, остальное можно докачать потом в разделе «Настройки»</span></label>
+            <label>Что вы хотите делать? <span class="hint" id="modeHint">— отметьте только нужное, остальное можно докачать потом в разделе «Модели»</span></label>
             <button type="button" class="a-change" id="modeAll" style="margin:6px 0 10px">Выбрать все</button>
             <div class="mode-cards" id="modePick">
               <button class="mcard" data-m="video"><i></i><b>Image-to-Video</b><span>Видео по тексту, по изображению, по первому и последнему кадру</span><small></small></button>
@@ -1568,6 +1671,53 @@ equirements.txt</code><br>
       </div>
     </section>
 
+    <!-- ============ SETTINGS ============ -->
+    <section class="view" id="view-settings">
+      <div class="head">
+        <div>
+          <h1>Настройки</h1>
+          <p>Тема и размер интерфейса. Применяется сразу и запоминается на этом компьютере</p>
+        </div>
+      </div>
+
+      <div class="set-wrap">
+        <div class="card">
+          <div class="card-h"><h3>Оформление</h3><span class="hint" id="themeName">Бордо</span></div>
+          <div class="set-row">
+            <div class="set-lbl"><b>Тема</b><small>цвет кнопок, подсветки и фона</small></div>
+            <div class="themes themes-set" id="themes" title="Тема оформления">
+              <button data-t="" style="background:#e8264f" title="Бордо"></button>
+              <button data-t="light" style="background:#f3f4f6" title="Светлая"></button>
+              <button data-t="gray" style="background:#b7bcc4" title="Серая"></button>
+              <button data-t="graphite" style="background:#272a30" title="Графит"></button>
+              <button data-t="night" style="background:#2fb5a8" title="Ночь"></button>
+              <button data-t="forest" style="background:#d4a24c" title="Лес"></button>
+            </div>
+          </div>
+          <div class="set-row">
+            <div class="set-lbl"><b>Размер интерфейса</b><small>подписи, кнопки и отступы целиком</small></div>
+            <div class="zoom-btns" id="uiZoom" title="Размер интерфейса (или Ctrl + колесо мыши)"><button class="btn" id="uiSm" type="button">А−</button><small id="uiPct">100%</small><button class="btn" id="uiLg" type="button">А+</button></div>
+          </div>
+          <div class="set-acts">
+            <button class="btn" id="setReset" type="button">Вернуть по умолчанию</button>
+            <span class="hint">тема «Бордо», масштаб 100 %</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h"><h3>Помощь</h3><span class="hint">если что-то не работает</span></div>
+          <div class="set-row">
+            <div class="set-lbl"><b>Отчёт для разработчика</b><small>приложение соберёт файл с данными о компьютере и ошибках — отправьте его автору</small></div>
+            <button class="btn" id="repBtn" type="button" title="Если что-то не работает, нажмите: приложение соберёт файл с данными о компьютере и ошибках. Отправьте этот файл автору.">Собрать отчёт</button>
+          </div>
+          <div class="set-row">
+            <div class="set-lbl"><b>Поддержать проект</b><small>программа бесплатная; если она помогла, можно поддержать автора</small></div>
+            <button class="btn" id="supBtn" type="button" title="Программа бесплатная. Если она вам помогла, можно поддержать автора: откроется страница оплаты в браузере. Ничего вводить в самой программе не нужно.">♥ Поддержать</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
   </main>
 </div>
 
@@ -1621,6 +1771,9 @@ equirements.txt</code><br>
 <script>
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+// the section that was open before the reload: read before anything overwrites it, and the same
+// key the app already keeps for its own "open where the user was last" timer
+const START_VIEW = (() => { try { return localStorage.getItem('h3-last-view') || ''; } catch { return ''; } })();
 
 /* ---------- local server (real ComfyUI) or offline demo ---------- */
 const API = location.protocol.startsWith('http');
@@ -1659,14 +1812,14 @@ function setEngine(on) {
 /* the main menu on the left can be hidden (to give the page the whole window) and shown again */
 (function () {
   const app = $('.app'), btn = $('#sbToggle');
-  const paint = () => { const off = app.classList.contains('nosb'); document.body.classList.toggle('nosb-on', off); btn.textContent = off ? '☰ Меню' : '‹ Меню'; btn.title = off ? 'Показать главное меню' : 'Скрыть главное меню'; };
+  const paint = () => { const off = app.classList.contains('nosb'); document.body.classList.toggle('nosb-on', off); btn.textContent = off ? '☰' : '‹'; btn.title = off ? 'Показать главное меню' : 'Скрыть главное меню'; };
   btn.onclick = () => { app.classList.toggle('nosb'); try { localStorage.setItem('h3-sb-hidden', app.classList.contains('nosb') ? '1' : ''); } catch {} paint(); };
   try { if (localStorage.getItem('h3-sb-hidden')) app.classList.add('nosb'); } catch {}
   paint();
 })();
 /* pinned top bar with every video and image section */
 (function () {
-  const bar = document.createElement('div'); bar.id = 'modeBar'; document.body.appendChild(bar);
+  const bar = document.createElement('div'); bar.id = 'modeBar'; $('.topbar').appendChild(bar);
   const SHORT = { video: 'Видео', lipsync: 'Lipsync', refs: 'Референсы', actor: 'Актёр', swap: 'Замена', long: 'Видеостудия', action: 'Экшн', krea: 'Изображение', qwen: 'Правка', upfile: 'Увеличить' };
   const GROUPS = [['presets'], ['video', 'lipsync', 'refs', 'actor', 'swap', 'long', 'action'], ['krea', 'qwen'], ['upfile']];
   function paint() {
@@ -1766,9 +1919,23 @@ async function pollSystem() {
     meter('#cpuTxt', '#cpuBar', s.cpu, s.cpu != null ? `${Math.round(s.cpu)} %` : '—');
     meter('#ramTxt', '#ramBar', s.ram.used_gb / s.ram.total_gb * 100, `${g1(s.ram.used_gb)} / ${g1(s.ram.total_gb)} ГБ`);
     if (s.disk) { $('#diskName').textContent = s.disk.drive; $('#diskTxt').textContent = `свободно ${s.disk.free_gb} ГБ`; }
+    // one line of numbers for the collapsed panel: the card folds to a strip on short windows
+    $('#sfMini').textContent = gpu && gpu.util != null
+      ? `GPU ${Math.round(gpu.util)}% · ${g1(gpu.vram_used_gb)}/${g1(gpu.vram_total_gb)} ГБ`
+      : `ЦП ${s.cpu != null ? Math.round(s.cpu) + '%' : '—'}`;
   } catch { /* the server is restarting; try again on the next tick */ }
 }
 setInterval(pollSystem, 2000);
+
+/* the computer panel is pinned under the scrolling navigation; on short windows it starts folded */
+(() => {
+  const box = $('#sysBox'), head = $('#sfToggle'), KEY = 'h3-sysbox';
+  let open = innerHeight >= 800;
+  try { const v = localStorage.getItem(KEY); if (v !== null) open = v === '1'; } catch {}
+  const paint = () => { box.classList.toggle('collapsed', !open); head.setAttribute('aria-expanded', String(open)); };
+  head.onclick = () => { open = !open; paint(); try { localStorage.setItem(KEY, open ? '1' : '0'); } catch {} };
+  paint();
+})();
 const normItem = it => ({ ...it, date: new Date(it.date) });
 
 /* ---------- navigation ---------- */
@@ -1777,6 +1944,49 @@ $$('.nav[data-view]').forEach(b => b.onclick = () => {
   $$('.nav').forEach(n => n.classList.toggle('active', n === b || (b.classList.contains('sub') && n.dataset.view === 'presets')));   // a section opened from the start page keeps it lit
   $$('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + b.dataset.view));
 });
+
+/* ---------- one header for the whole window ---------- */
+// Every section owns a .head with its title, hint and action. The active one is moved into the
+// top bar (so it never scrolls) and put back into its section when another one takes its place.
+(() => {
+  const slot = $('#tbHead'), main = $('.main');
+  let cur = null;
+  // a moved head leaves an invisible placeholder in its section, so it can go back exactly where it was
+  const take = () => {
+    if (!cur) return;
+    if (cur.isConnected) {
+      if (cur._slot && cur._slot.parentNode) cur._slot.replaceWith(cur); else cur._home.prepend(cur);
+    }
+    cur = null;
+  };
+  const place = () => {
+    const view = main.querySelector('.view.active');
+    // the agent page fills the window and never scrolls: drop the reserved scrollbar gutter there
+    document.body.classList.toggle('fit-page', !!view && view.id === 'view-agent');
+    // a section may rebuild its own markup, and the saved head goes away with it
+    if (cur && !cur.isConnected) cur = null;
+    // the active section's head is either still inside it or already moved into the top bar;
+    // the Home page has no .head, its title block is .pr-head
+    const inView = view && (view.querySelector('.head') || view.querySelector('.pr-head'));
+    const head = inView || (cur && cur._home === view ? cur : null);
+    if (!head) { take(); return; }
+    if (head === cur) return;
+    take();
+    cur = head; head._home = view;
+    head._slot = document.createComment('head');
+    head.replaceWith(head._slot);
+    slot.append(head);
+  };
+  place();
+  // sections are shown by toggling .active, and some rebuild their markup: catch both
+  let queued = false;
+  new MutationObserver(() => {
+    if (queued) return; queued = true;
+    requestAnimationFrame(() => { queued = false; place(); });
+  }).observe(main, { attributes: true, attributeFilter: ['class'], subtree: true, childList: true });
+  // the layout switches at 1100px: whether that view fills the window depends on the width
+  addEventListener('resize', place);
+})();
 
 /* ---------- resolution / duration math (from the workflows) ---------- */
 const ASPECTS = [
@@ -2015,7 +2225,7 @@ function previewPanel(el, st, opts) {
     </div>
     <button class="go"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg>Сгенерировать</button>
     <button class="stop" hidden><i></i>Остановить генерацию</button>
-    <div class="cloud-line" hidden>☁ Генерация пойдёт в облако <b>RunningHub</b> (переключить — в разделе «Настройки»)</div>
+    <div class="cloud-line" hidden>☁ Генерация пойдёт в облако <b>RunningHub</b> (переключить — в разделе «Модели»)</div>
     <div class="status"></div>`;
   const frame = $('.frame', el), go = $('.go', el), stopB = $('.stop', el), status = $('.status', el);
   const live = $('.live', el), hud = $('.live-hud', el), bar = $('.bar', el);
@@ -2827,7 +3037,7 @@ function pickOpt(opt) {
   $('#wzStart').textContent = opt === 'external' ? 'Подключиться' : 'Установить';
   // with your own ComfyUI nothing is downloaded: the choice only says which sections are in use
   $('#modePick').classList.toggle('ext', opt === 'external'); $('#modeTotal').hidden = opt === 'external';
-  $('#modeHint').textContent = opt === 'external' ? '— отметьте разделы, которыми будете пользоваться; остальные приложение проверять не будет' : '— отметьте только нужное, остальное можно докачать потом в разделе «Настройки»';
+  $('#modeHint').textContent = opt === 'external' ? '— отметьте разделы, которыми будете пользоваться; остальные приложение проверять не будет' : '— отметьте только нужное, остальное можно докачать потом в разделе «Модели»';
   $('#wzErr').textContent = '';
 }
 $$('#wzChoose .opt').forEach(o => o.onclick = () => pickOpt(o.dataset.opt));
@@ -2928,7 +3138,7 @@ $('#wzStart').onclick = async () => {
       toast(`Подключено к ComfyUI ${r.version || ''}`);
       if (r.ws_ok === false) toast('Внимание: сервер не пропускает живую связь (WebSocket). Задания могут не показывать ход работы и не заканчиваться. Напишите об этом разработчику и укажите, какой это сервис.');
       await afterSetup();
-      if (r.nodes_missing?.length) { goTo('models'); toast(`В вашем ComfyUI нет нод: ${r.nodes_missing.join(', ')}. Подробности в разделе «Настройки».`); }
+      if (r.nodes_missing?.length) { goTo('models'); toast(`В вашем ComfyUI нет нод: ${r.nodes_missing.join(', ')}. Подробности в разделе «Модели».`); }
     } else {
 
       await postJSON('/api/setup/install', { install_dir: $('#instDir').value.trim(), profile: setupProfile, modes: setupModes });
@@ -3185,7 +3395,8 @@ function firstRun(on) { document.body.classList.toggle('first-run', !!on); }
 let SET_LOCK = false;
 function setNavLocked(lock) {
   SET_LOCK = lock; firstRun(lock || !localStorage.getItem('h3-seen-settings'));
-  $$('.nav[data-view]').forEach(n => { if (n.dataset.view !== 'models') n.disabled = lock; });
+  // the appearance settings stay reachable while the engine is not set up yet
+  $$('.nav[data-view]').forEach(n => { if (n.dataset.view !== 'models' && n.dataset.view !== 'settings') n.disabled = lock; });
 }
 $('.nav[data-view="models"]').addEventListener('click', async () => {
   try { localStorage.setItem('h3-seen-settings', '1'); } catch {}
@@ -4384,7 +4595,7 @@ function makeRefMode(cfg) {
       if (cfg.swap) { const d = $('.dur', root); if (d) { d.max = 15; d.disabled = S.autoLen !== false; } root._paintSnd && root._paintSnd(); }
       $$('.rm-acc button', root).forEach(b => b.classList.toggle('on', b.dataset.x === S.accel));
       const ah = $('.rm-acc-hint', root); if (ah) ah.textContent = S.accel === 'pika'
-        ? 'Pika H3 Flex Turbo: звук получается заметно лучше. Работает на 6–8 шагах (4 шага для неё поднимутся до 6).' + (S.pikaHave === false ? ' Файла Pika нет — скачайте его в разделе «Настройки».' : '')
+        ? 'Pika H3 Flex Turbo: звук получается заметно лучше. Работает на 6–8 шагах (4 шага для неё поднимутся до 6).' + (S.pikaHave === false ? ' Файла Pika нет — скачайте его в разделе «Модели».' : '')
         : 'Прежнее ускорение (LoRA на 4 шага): быстрее, но звук проще.';
     },
   });
@@ -4569,7 +4780,7 @@ function openRent() {
 }
 $('#mdRentCard').addEventListener('click', e => { const b = e.target.closest('[data-rent]'); if (!b) return; if (b.dataset.rent === 'how') openRent(); else connectRent(); });
 $('#view-presets').innerHTML = `<div class="pr-steps" id="prSteps"><span class="st"><i>1</i>Тип</span><u></u><span class="st"><i>2</i>Вариант</span><u></u><span class="st"><i>3</i>Создать</span></div>
-  <div class="pr-first"><div class="n">1</div><div><b>Сначала откройте «Настройки»</b><span>Там выбирается, как работает программа: «Я новичок» (всё скачается само) или «У меня уже есть ComfyUI и модели». Без этого генерация не начнётся.</span></div><button class="btn primary" id="prGoSet" type="button">Открыть Настройки</button></div>
+  <div class="pr-first"><div class="n">1</div><div><b>Сначала откройте «Модели»</b><span>Там выбирается, как работает программа: «Я новичок» (всё скачается само) или «У меня уже есть ComfyUI и модели». Без этого генерация не начнётся.</span></div><button class="btn primary" id="prGoSet" type="button">Открыть Модели</button></div>
   <div class="pr-head"><h1 id="prTitle"></h1><p id="prSub"></p></div>
   <div class="pr-types" id="prTypes">
     <button class="pr-type" type="button" data-t="image"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.7"/><path d="m21 16-5-5L6 20"/></svg></span><b>Изображение</b><p>Создать по описанию, изменить готовое, карта героя, раскадровка</p></button>
@@ -5049,7 +5260,7 @@ async function clipText() {
   try { const t = await navigator.clipboard.readText(); if (t) return t; } catch {}
   try { return (await (await fetch('/api/clipboard', { method: 'POST' })).json()).text || ''; } catch { return ''; }
 }
-$('#agClear').onclick = () => { const ta = $('#agIn'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus(); };
+$('#agClearIn').onclick = () => { const ta = $('#agIn'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus(); };
 
 // right-click menu: copy / cut / paste / select all in every text field, copy on any selectable text
 (() => {
@@ -5773,7 +5984,7 @@ function cwPick(key) {
     } catch { toast('Не удалось взять файл'); }
   };
 }
-/* ---------- picture slots: choose "from the library" or "from the computer" ---------- */
+/* ---------- picture slots: from the library, from the computer, paste from the clipboard, copy back ---------- */
 document.addEventListener('click', e => {
   const lb = e.target.closest('label.drop, label.ref'); if (!lb || e.target.closest('.x, select, input')) return;
   const input = $('input[type=file]', lb); if (!input) return;
@@ -5781,9 +5992,22 @@ document.addEventListener('click', e => {
   let m = $('#picSrc');
   if (!m) { m = document.createElement('div'); m.className = 'modal'; m.id = 'picSrc'; document.body.append(m); }
   m.hidden = false;
+  const slotFile = lb._file || null;  // a filled slot can also give its picture back to the clipboard
   const showSrc = () => {
-    m.innerHTML = '<div class="box" style="padding:20px;max-width:360px"><div class="card-h"><h3>Откуда взять изображение?</h3><button class="btn" data-x type="button">Закрыть</button></div>'
-      + '<div style="display:grid;gap:10px"><button class="btn pri" data-s="lib" type="button">Из Библиотеки</button><button class="btn" data-s="pc" type="button">С компьютера</button></div></div>';
+    m.innerHTML = '<div class="box" style="padding:20px;max-width:380px"><div class="card-h"><h3>Откуда взять картинку?</h3><button class="btn" data-x type="button">Закрыть</button></div>'
+      + '<div style="display:grid;gap:10px">'
+      + (slotFile ? '<button class="btn pri" data-s="copy" type="button">Копировать</button>' : '')
+      + `<button class="btn${slotFile ? '' : ' pri'}" data-s="lib" type="button">Из Библиотеки</button>`
+      + '<button class="btn" data-s="pc" type="button">С компьютера</button>'
+      + '<button class="btn" data-s="paste" type="button" disabled>Вставить</button>'
+      + '</div><div class="hint" id="picPasteHint" style="margin-top:10px">Проверяем буфер обмена…</div></div>';
+    const paste = $('[data-s="paste"]', m), hint = $('#picPasteHint', m);
+    fetch('/api/clipboard/has-image', { cache: 'no-store' }).then(r => r.json()).then(j => {
+      if (!paste.isConnected) return;
+      paste.disabled = !(j && j.have);
+      hint.textContent = paste.disabled ? 'В буфере обмена нет картинки. Скопируйте её в любой программе — и нажмите сюда снова.'
+        : 'Вставка: картинка из буфера обмена попадёт в это место как файл.';
+    }).catch(() => { hint.textContent = ''; });
   };
   const showLib = () => {
     const items = LIB.filter(it => !it.missing && it.url).sort((a, b) => b.date - a.date);
@@ -5795,7 +6019,36 @@ document.addEventListener('click', e => {
   m.onclick = async ev => {
     if (ev.target === m || ev.target.closest('[data-x]')) { m.hidden = true; return; }
     const s = ev.target.closest('[data-s]');
-    if (s) { if (s.dataset.s === 'pc') { m.hidden = true; input.click(); } else showLib(); return; }
+    if (s) {
+      const kind = s.dataset.s;
+      if (kind === 'pc') { m.hidden = true; input.click(); return; }
+      if (kind === 'lib') { showLib(); return; }
+      if (kind === 'paste') {
+        if (s.disabled) return;
+        const was = s.textContent; s.disabled = true; s.textContent = 'Вставляем…';
+        try {
+          const data = await pasteFromClipboard();
+          await setDropFile(input, data);
+          m.hidden = true; toast('Картинка вставлена из буфера обмена');
+        } catch (err) {
+          s.disabled = false; s.textContent = was;
+          toast(err && err.message ? err.message : 'Не удалось вставить картинку');
+        }
+        return;
+      }
+      if (kind === 'copy') {
+        if (!slotFile) return;
+        const was = s.textContent; s.disabled = true; s.textContent = 'Копируем…';
+        try {
+          await copyToClipboard(slotFile);
+          m.hidden = true; toast('Картинка скопирована — вставьте её в другую программу');
+        } catch (err) {
+          s.disabled = false; s.textContent = was;
+          toast(err && err.message ? err.message : 'Не удалось скопировать картинку');
+        }
+        return;
+      }
+    }
     const th = ev.target.closest('.cw-th'); if (!th) return;
     const it = LIB.find(x => x.id === th.dataset.id); if (!it) return;
     try {
@@ -5804,6 +6057,27 @@ document.addEventListener('click', e => {
     } catch { toast('Не удалось взять файл'); }
   };
 }, true);
+
+/* the picture clipboard is the server's job: the web view is not allowed to touch it */
+const PIC_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/gif': 'gif', 'image/avif': 'avif' };
+async function pasteFromClipboard() {
+  const r = await fetch('/api/clipboard/image', { cache: 'no-store' });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'В буфере обмена нет картинки');
+  const blob = await r.blob();
+  const type = PIC_EXT[blob.type] ? blob.type : 'image/png';  // a file copied in Explorer keeps its own format
+  return new File([blob], `clipboard-${Date.now()}.${PIC_EXT[type]}`, { type });
+}
+async function copyToClipboard(file) {
+  let blob = file;
+  if (file.type !== 'image/png') {  // the clipboard takes PNG; the browser converts, so no picture is lost
+    const img = await createImageBitmap(file);
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    c.getContext('2d').drawImage(img, 0, 0); if (img.close) img.close();
+    blob = await new Promise((ok, no) => c.toBlob(b => b ? ok(b) : no(new Error('Не удалось подготовить картинку')), 'image/png'));
+  }
+  const r = await fetch('/api/clipboard/image', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Не удалось скопировать картинку');
+}
 async function libToFile(it) {
   let blob;
   if (it.kind === 'image') blob = await (await fetch(it.url)).blob();
@@ -5858,8 +6132,8 @@ function useMenu(it) {
   tray.innerHTML = '<button class="lt-tab" type="button" title="Последние изображения из Библиотеки — перетащите на нужное место">Библиотека</button><div class="lt-body" hidden></div>';
   document.body.append(tray);
   const st = document.createElement('style');
-  st.textContent = '#libTray{position:fixed;right:0;top:50%;transform:translateY(-50%);z-index:30;display:flex;align-items:center}#libTray[hidden]{display:none}'
-    + '.lt-tab{writing-mode:vertical-rl;padding:12px 6px;border-radius:10px 0 0 10px;background:var(--card,#222);border:1px solid var(--line-2);border-right:0;color:var(--text);font-size:12px;font-weight:700;cursor:pointer}'
+  st.textContent = '#libTray{position:fixed;right:var(--sb-gap,0px);top:50%;transform:translateY(-50%);z-index:30;display:flex;align-items:center}#libTray[hidden]{display:none}'
+    + '.lt-tab{writing-mode:vertical-rl;padding:12px 6px;border-radius:10px;background:var(--card,#222);border:1px solid var(--line-2);color:var(--text);font-size:12px;font-weight:700;cursor:pointer}'
     + '.lt-body{width:130px;max-height:calc(var(--vh,1vh)*70);overflow:auto;padding:8px;display:grid;gap:8px;background:var(--bg-2);border:1px solid var(--line-2);border-radius:12px 0 0 12px}'
     + '.lt-body img,.lt-body video{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;cursor:pointer;display:block}';
   document.head.append(st);
@@ -6090,10 +6364,10 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
       if (!(st.modes || []).includes(role) || miss.length) {
         hint.hidden = false;
         hint.textContent = st.engine === 'managed'
-          ? `Для этой модели нужны ещё файлы. Откройте «Настройки» и нажмите «Добавить ${role === 'flux' ? 'Правка изображения: FLUX.2' : 'Правка изображения'}».`
+          ? `Для этой модели нужны ещё файлы. Откройте «Модели» и нажмите «Добавить ${role === 'flux' ? 'Правка изображения: FLUX.2' : 'Правка изображения'}».`
           : role === 'flux'
-            ? 'Положите в папки моделей вашего ComfyUI: flux-2-klein-4b-fp8.safetensors (diffusion_models), qwen_3_4b.safetensors (text_encoders) и flux2-vae.safetensors (vae). Потом обновите раздел «Настройки».'
-            : 'Для Qwen 2.1 нужны её модели (раздел «Правка изображения»). Проверьте «Настройки».';
+            ? 'Положите в папки моделей вашего ComfyUI: flux-2-klein-4b-fp8.safetensors (diffusion_models), qwen_3_4b.safetensors (text_encoders) и flux2-vae.safetensors (vae). Потом обновите раздел «Модели».'
+            : 'Для Qwen 2.1 нужны её модели (раздел «Правка изображения»). Проверьте «Модели».';
       }
     } catch {}
   }
@@ -6110,8 +6384,8 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
       if (!(st.modes || []).includes('kreareal') || miss.length) {
         hint.hidden = false;
         hint.textContent = st.engine === 'managed'
-          ? 'Для реализма нужны ещё две модели (около 15 ГБ). Откройте «Настройки» и нажмите «Добавить Изображение: реализм».'
-          : 'Для реализма положите в папки моделей вашего ComfyUI: redcraftKREA2RedMix_krea2Edition.safetensors (diffusion_models) и realism_engine_krea2_v2.safetensors (loras). Потом обновите раздел «Настройки».';
+          ? 'Для реализма нужны ещё две модели (около 15 ГБ). Откройте «Модели» и нажмите «Добавить Изображение: реализм».'
+          : 'Для реализма положите в папки моделей вашего ComfyUI: redcraftKREA2RedMix_krea2Edition.safetensors (diffusion_models) и realism_engine_krea2_v2.safetensors (loras). Потом обновите раздел «Модели».';
       }
     } catch {}
   });
@@ -6186,6 +6460,7 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
           <label class="drop qw-s2" id="qwDrop2" title="Ещё одно изображение (референс, по желанию)"><input type="file" accept="image/*"><div class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div><span class="tag" hidden>2</span><button class="x" type="button">✕</button></label>
           <label class="drop qw-s3" id="qwDrop3" title="Ещё одно изображение (референс, по желанию)"><input type="file" accept="image/*"><div class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div><span class="tag" hidden>3</span><button class="x" type="button">✕</button></label>
         </div>
+        <div class="hresize" id="qwResize" title="Потяните вверх или вниз, чтобы изменить высоту картинок. Двойной клик — вернуть как было"></div>
         <div class="hint qw-morehint" style="margin-top:8px"></div></div>
       <div class="card"><div class="card-h"><h3><span class="n">2</span>Что делаем</h3></div>
         <div class="seg qw-kind" style="grid-template-columns:repeat(3,1fr)"><button data-k="edit">Править изображение<small>изменить по описанию</small></button><button data-k="sheet">Лист персонажа<small>4 или 6 видов с разных сторон</small></button><button data-k="story">Раскадровка<small>история по изображениям героя и места</small></button></div>
@@ -6275,13 +6550,48 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
       if (!(st.modes || []).includes('flux') || miss.length) {
         hint.hidden = false;
         hint.textContent = st.engine === 'managed'
-          ? 'Для этой модели нужны ещё три файла (около 12 ГБ). Откройте «Настройки» и нажмите «Добавить Правка изображения: FLUX.2».'
-          : 'Положите в папки моделей вашего ComfyUI: flux-2-klein-4b-fp8.safetensors (diffusion_models), qwen_3_4b.safetensors (text_encoders) и flux2-vae.safetensors (vae). Потом обновите раздел «Настройки».';
+          ? 'Для этой модели нужны ещё три файла (около 12 ГБ). Откройте «Модели» и нажмите «Добавить Правка изображения: FLUX.2».'
+          : 'Положите в папки моделей вашего ComfyUI: flux-2-klein-4b-fp8.safetensors (diffusion_models), qwen_3_4b.safetensors (text_encoders) и flux2-vae.safetensors (vae). Потом обновите раздел «Модели».';
       }
     } catch {}
   }
   imgSeedWire(root, S); upd();
   IMG.qwen = { fill: it => { if (it.engine) S.engine = it.engine; if (it.frames !== undefined) S.frames = !!it.frames; if (String(it.sub || '').startsWith('Раскадровка по кадрам')) S.frames = true; else if (String(it.sub || '').startsWith('Раскадровка')) S.frames = false; if (it.kind === 'story' || String(it.sub || '').startsWith('Раскадровка')) { S.kind = 'story'; $('.qw-prompt', root).value = it.prompt || ''; } else if (it.sub === 'Лист персонажа') S.kind = 'sheet'; else { S.kind = 'edit'; $('.qw-prompt', root).value = it.prompt || ''; } upd(); } };
+})();
+
+/* "Правка картинки": a grip under the picture slots changes their height (like the first/last frames).
+   With no height of the user's own, the slots start small enough for the whole page to fit the window. */
+(() => {
+  const root = document.documentElement, KEY = 'h3.qwh', bar = $('#qwResize');
+  const clampH = v => Math.round(Math.min(Math.max(v, 60), 420));
+  const own = () => { try { return +localStorage.getItem(KEY) >= 60; } catch { return false; } };
+  try { const v = +localStorage.getItem(KEY); if (v >= 60) root.style.setProperty('--qw-h', v + 'px'); } catch {}
+  // shrink the slots by exactly the overflow of the page, down to the minimum
+  const fit = () => {
+    if (own()) return;
+    root.style.removeProperty('--qw-h');
+    requestAnimationFrame(() => {
+      if (!$('#view-qwen').classList.contains('active')) return;
+      const main = $('.main'), over = main.scrollHeight - main.clientHeight;
+      if (over > 0) root.style.setProperty('--qw-h', clampH($('#qwDrop').getBoundingClientRect().height - over) + 'px');
+    });
+  };
+  bar.addEventListener('pointerdown', e => { e.preventDefault(); bar.setPointerCapture(e.pointerId); bar.classList.add('drag'); });
+  bar.addEventListener('pointermove', e => {
+    if (!bar.hasPointerCapture(e.pointerId)) return;
+    root.style.setProperty('--qw-h', clampH(e.clientY - $('#qwDrop').getBoundingClientRect().top) + 'px');
+  });
+  bar.addEventListener('pointerup', e => {
+    bar.releasePointerCapture(e.pointerId); bar.classList.remove('drag');
+    try { localStorage.setItem(KEY, parseInt(root.style.getPropertyValue('--qw-h'))); } catch {}
+  });
+  bar.addEventListener('dblclick', () => {
+    root.style.removeProperty('--qw-h');
+    try { localStorage.removeItem(KEY); } catch {}
+    fit();
+  });
+  $('.nav[data-view="qwen"]').addEventListener('click', fit);
+  addEventListener('resize', () => { if ($('#view-qwen').classList.contains('active')) fit(); });
 })();
 
 
@@ -6515,9 +6825,11 @@ if (API) {
 // theme switcher
 (() => {
   const KEY = 'h3-theme', root = document.documentElement, box = document.getElementById('themes');
+  const NAMES = { '': 'Бордо', light: 'Светлая', gray: 'Серая', graphite: 'Графит', night: 'Ночь', forest: 'Лес' };
   const apply = t => {
     if (t) root.setAttribute('data-theme', t); else root.removeAttribute('data-theme');
     box.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.t === (t || '')));
+    const nm = document.getElementById('themeName'); if (nm) nm.textContent = NAMES[t] || NAMES[''];
     if (typeof drawWave === 'function' && typeof peaks !== 'undefined' && peaks && peaks.length) { try { drawWave(); } catch {} }
   };
   let cur = ''; try { cur = localStorage.getItem(KEY) || ''; } catch {}
@@ -6532,7 +6844,12 @@ if (API) {
 const UI_Z = { ui: 1, lib: 230 };
 try { UI_Z.ui = +localStorage.getItem('h3-ui-zoom') || 1; UI_Z.lib = +localStorage.getItem('h3-lib-size') || 230; } catch {}
 // with a zoomed page the browser's vh units stay those of the real window: windows stopped above the bottom edge. --vh is 1/100 of the visible height in page units.
-function setVh() { document.documentElement.style.setProperty('--vh', (innerHeight / (UI_Z.ui || 1) / 100) + 'px'); }
+function setVh() {
+  document.documentElement.style.setProperty('--vh', (innerHeight / (UI_Z.ui || 1) / 100) + 'px');
+  // width of the .main scrollbar: the fixed "Библиотека" tab is placed left of it instead of on top of it
+  const m = document.querySelector('.main');
+  document.documentElement.style.setProperty('--sb-gap', (m ? Math.max(0, m.offsetWidth - m.clientWidth) : 0) + 'px');
+}
 addEventListener('resize', setVh);
 function applyZoom() {
   UI_Z.ui = Math.min(1.5, Math.max(0.6, Math.round(UI_Z.ui * 20) / 20));
@@ -6556,6 +6873,12 @@ window.addEventListener('wheel', e => {
   applyZoom();
 }, { passive: false });
 applyZoom();
+// "Вернуть по умолчанию" in Настройки: the default theme and 100 %
+$('#setReset').onclick = () => {
+  const def = $('#themes button[data-t=""]'); if (def) def.click();
+  UI_Z.ui = 1; UI_Z.lib = 230; applyZoom();
+  toast('Оформление вернулось к исходному');
+};
 
 /* ---------- MONTAGE: join library clips in a chosen order (ComfyUI does the work, no ffmpeg) ---------- */
 (function mountMontage() {
@@ -6886,6 +7209,21 @@ applyZoom();
   });
   rs.addEventListener('dblclick', () => { root.style.removeProperty('--sbw'); try { localStorage.removeItem(KEY); } catch {} });
 })();
+
+/* reload the interface without restarting the app: pywebview turns WebView2's own F5/Ctrl+R accelerators off (AreBrowserAcceleratorKeysEnabled = debug) */
+addEventListener('keydown', e => {
+  const r = (e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'r';
+  if (e.key === 'F5' || r) { e.preventDefault(); location.reload(); }
+});
+
+/* come back to the section that was open before the reload: the click runs its usual handlers,
+   and only then the window is shown (html.booted), so the default video page never flashes */
+if (START_VIEW && START_VIEW !== 'models') {
+  const back = $(`.nav[data-view="${START_VIEW}"]`);
+  if (back && !back.disabled) back.click();
+}
+// show the window on the next frame, once the header of the restored section has moved up as well
+requestAnimationFrame(() => document.documentElement.classList.add('booted'));
 </script>
 </body>
 </html>
