@@ -5026,7 +5026,7 @@ function cwPick(key) {
     } catch { toast('Не удалось взять файл'); }
   };
 }
-/* ---------- picture slots: choose "from the library" or "from the computer" ---------- */
+/* ---------- picture slots: from the library, from the computer, paste from the clipboard, copy back ---------- */
 document.addEventListener('click', e => {
   const lb = e.target.closest('label.drop, label.ref'); if (!lb || e.target.closest('.x, select, input')) return;
   const input = $('input[type=file]', lb); if (!input) return;
@@ -5034,9 +5034,22 @@ document.addEventListener('click', e => {
   let m = $('#picSrc');
   if (!m) { m = document.createElement('div'); m.className = 'modal'; m.id = 'picSrc'; document.body.append(m); }
   m.hidden = false;
+  const slotFile = lb._file || null;  // a filled slot can also give its picture back to the clipboard
   const showSrc = () => {
-    m.innerHTML = '<div class="box" style="padding:20px;max-width:360px"><div class="card-h"><h3>Откуда взять картинку?</h3><button class="btn" data-x type="button">Закрыть</button></div>'
-      + '<div style="display:grid;gap:10px"><button class="btn pri" data-s="lib" type="button">Из Библиотеки</button><button class="btn" data-s="pc" type="button">С компьютера</button></div></div>';
+    m.innerHTML = '<div class="box" style="padding:20px;max-width:380px"><div class="card-h"><h3>Откуда взять картинку?</h3><button class="btn" data-x type="button">Закрыть</button></div>'
+      + '<div style="display:grid;gap:10px">'
+      + (slotFile ? '<button class="btn pri" data-s="copy" type="button">Копировать</button>' : '')
+      + `<button class="btn${slotFile ? '' : ' pri'}" data-s="lib" type="button">Из Библиотеки</button>`
+      + '<button class="btn" data-s="pc" type="button">С компьютера</button>'
+      + '<button class="btn" data-s="paste" type="button" disabled>Вставить</button>'
+      + '</div><div class="hint" id="picPasteHint" style="margin-top:10px">Проверяем буфер обмена…</div></div>';
+    const paste = $('[data-s="paste"]', m), hint = $('#picPasteHint', m);
+    fetch('/api/clipboard/has-image', { cache: 'no-store' }).then(r => r.json()).then(j => {
+      if (!paste.isConnected) return;
+      paste.disabled = !(j && j.have);
+      hint.textContent = paste.disabled ? 'В буфере обмена нет картинки. Скопируйте её в любой программе — и нажмите сюда снова.'
+        : 'Вставка: картинка из буфера обмена попадёт в это место как файл.';
+    }).catch(() => { hint.textContent = ''; });
   };
   const showLib = () => {
     const items = LIB.filter(it => !it.missing && it.url).sort((a, b) => b.date - a.date);
@@ -5048,7 +5061,36 @@ document.addEventListener('click', e => {
   m.onclick = async ev => {
     if (ev.target === m || ev.target.closest('[data-x]')) { m.hidden = true; return; }
     const s = ev.target.closest('[data-s]');
-    if (s) { if (s.dataset.s === 'pc') { m.hidden = true; input.click(); } else showLib(); return; }
+    if (s) {
+      const kind = s.dataset.s;
+      if (kind === 'pc') { m.hidden = true; input.click(); return; }
+      if (kind === 'lib') { showLib(); return; }
+      if (kind === 'paste') {
+        if (s.disabled) return;
+        const was = s.textContent; s.disabled = true; s.textContent = 'Вставляем…';
+        try {
+          const data = await pasteFromClipboard();
+          await setDropFile(input, data);
+          m.hidden = true; toast('Картинка вставлена из буфера обмена');
+        } catch (err) {
+          s.disabled = false; s.textContent = was;
+          toast(err && err.message ? err.message : 'Не удалось вставить картинку');
+        }
+        return;
+      }
+      if (kind === 'copy') {
+        if (!slotFile) return;
+        const was = s.textContent; s.disabled = true; s.textContent = 'Копируем…';
+        try {
+          await copyToClipboard(slotFile);
+          m.hidden = true; toast('Картинка скопирована — вставьте её в другую программу');
+        } catch (err) {
+          s.disabled = false; s.textContent = was;
+          toast(err && err.message ? err.message : 'Не удалось скопировать картинку');
+        }
+        return;
+      }
+    }
     const th = ev.target.closest('.cw-th'); if (!th) return;
     const it = LIB.find(x => x.id === th.dataset.id); if (!it) return;
     try {
@@ -5057,6 +5099,27 @@ document.addEventListener('click', e => {
     } catch { toast('Не удалось взять файл'); }
   };
 }, true);
+
+/* the picture clipboard is the server's job: the web view is not allowed to touch it */
+const PIC_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/gif': 'gif', 'image/avif': 'avif' };
+async function pasteFromClipboard() {
+  const r = await fetch('/api/clipboard/image', { cache: 'no-store' });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'В буфере обмена нет картинки');
+  const blob = await r.blob();
+  const type = PIC_EXT[blob.type] ? blob.type : 'image/png';  // a file copied in Explorer keeps its own format
+  return new File([blob], `clipboard-${Date.now()}.${PIC_EXT[type]}`, { type });
+}
+async function copyToClipboard(file) {
+  let blob = file;
+  if (file.type !== 'image/png') {  // the clipboard takes PNG; the browser converts, so no picture is lost
+    const img = await createImageBitmap(file);
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    c.getContext('2d').drawImage(img, 0, 0); if (img.close) img.close();
+    blob = await new Promise((ok, no) => c.toBlob(b => b ? ok(b) : no(new Error('Не удалось подготовить картинку')), 'image/png'));
+  }
+  const r = await fetch('/api/clipboard/image', { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: blob });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Не удалось скопировать картинку');
+}
 async function libToFile(it) {
   let blob;
   if (it.kind === 'image') blob = await (await fetch(it.url)).blob();
