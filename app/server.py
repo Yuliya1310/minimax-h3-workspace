@@ -2672,15 +2672,32 @@ class App:
         item = self.library.get(req.match_info["id"])
         if not item:
             raise web.HTTPNotFound()
-        recycled = False
-        for path in {p for p in (self.file_path(item), Path(item["local"]) if item.get("local") else None) if p}:
-            if path.exists():   # the original and the program's own copy both go to the Recycle Bin
-                ok = await asyncio.to_thread(send_to_recycle_bin, path)
-                recycled = recycled or ok
-                if not ok:
-                    return web.json_response({"error": "Не удалось переместить файл в корзину"}, status=500)
-        self.library.remove(item["id"])
-        return web.json_response({"ok": True, "recycled": recycled})
+        res = await self.delete_items([item])
+        if res["failed"]:
+            return web.json_response({"error": "Не удалось переместить файл в корзину"}, status=500)
+        return web.json_response({"ok": True, "recycled": res["recycled"]})
+
+    async def delete_items(self, items):
+        """Library items to the Recycle Bin (the original and the program's own copy), all files in one go."""
+        todo, files = [], {}
+        for item in items:
+            paths = {p for p in (self.file_path(item), Path(item["local"]) if item.get("local") else None) if p and p.exists()}
+            files[item["id"]] = paths
+            todo += paths
+        gone = set(await asyncio.to_thread(send_to_recycle_bin, todo)) if todo else set()
+        done, failed = [], []
+        for item in items:
+            if files[item["id"]] <= gone:
+                self.library.remove(item["id"])
+                done.append(item["id"])
+            else:
+                failed.append(item["id"])
+        return {"done": done, "failed": failed, "recycled": bool(gone)}
+
+    async def h_library_delete_many(self, req):
+        ids = [i for i in (await req.json()).get("ids", []) if isinstance(i, str)][:2000]
+        items = [x for x in (self.library.get(i) for i in ids) if x]
+        return web.json_response(await self.delete_items(items))
 
     async def h_results_get(self, _req):
         items = self.library.items
@@ -3145,12 +3162,16 @@ def comfy_error_text(res):
     return "\n".join(p for p in parts if p) or "ComfyUI отклонил задание"
 
 
-def send_to_recycle_bin(path):
+def send_to_recycle_bin(paths):
+    """Move files to the Recycle Bin with ONE hidden PowerShell (before: one visible blue window per file). Returns the paths that are gone."""
+    paths = [Path(p) for p in ([paths] if isinstance(paths, (str, Path)) else paths)]
+    if not paths:
+        return []
     ps = ("Add-Type -AssemblyName Microsoft.VisualBasic; "
-          "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($env:H3_DEL, 'OnlyErrorDialogs', 'SendToRecycleBin')")
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                       env={**os.environ, "H3_DEL": str(path)}, capture_output=True)
-    return r.returncode == 0 and not path.exists()
+          "foreach ($p in ($env:H3_DEL -split '\\|')) { if ($p) { try { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($p, 'OnlyErrorDialogs', 'SendToRecycleBin') } catch {} } }")   # '|' cannot be in a Windows path
+    subprocess.run(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], capture_output=True,
+                   env={**os.environ, "H3_DEL": "|".join(str(p) for p in paths)}, creationflags=engine.CREATE_NO_WINDOW)
+    return [p for p in paths if not p.exists()]
 
 
 def build_app(comfy_override=None):
@@ -3251,6 +3272,7 @@ def build_app(comfy_override=None):
         web.get("/api/library", state.h_library),
         web.patch("/api/library/{id}", state.h_library_patch),
         web.delete("/api/library/{id}", state.h_library_delete),
+        web.post("/api/library/delete", state.h_library_delete_many),
         web.get("/api/file/{id}", state.h_file),
         web.get("/api/srcfile/{id}", state.h_srcfile),
         web.get("/api/events", state.h_events),

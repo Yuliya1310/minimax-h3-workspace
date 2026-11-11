@@ -3502,11 +3502,16 @@ function askDelete(ids) {
   $('#cfText').textContent = 'Файлы переместятся в корзину Windows — их можно будет восстановить.';
   $('#confirm').hidden = false;
   $('#cfOk').onclick = async () => {
+    $('#confirm').hidden = true;
     if (API) {
-      for (const id of [...ids]) {
-        const r = await fetch(`/api/library/${id}`, { method: 'DELETE' });
-        if (!r.ok) { toast((await r.json().catch(() => ({}))).error || 'Не удалось удалить'); ids = ids.filter(x => x !== id); }
-      }
+      // the page itself keeps the video files open: let them go first, otherwise Windows says «файл уже используется»
+      $$('video').forEach(v => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch {} });
+      toast(ids.length === 1 ? 'Удаляем…' : `Удаляем ${ids.length}…`);
+      try {
+        const r = await fetch('/api/library/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+        const j = await r.json();
+        if (j.failed?.length) { toast(`Не удалось удалить: ${j.failed.length}. Возможно, файл открыт в другой программе.`); const bad = new Set(j.failed); ids = ids.filter(x => !bad.has(x)); }
+      } catch { toast('Не удалось удалить'); ids = []; }
     }
     ids.forEach(id => { const i = LIB.findIndex(x => x.id === id); if (i >= 0) LIB.splice(i, 1); selected.delete(id); });
     $('#confirm').hidden = true;
@@ -7220,7 +7225,7 @@ applyZoom();
   }, { threshold: 0.01 });
   const reg = v => {
     if (seen.has(v)) return; seen.add(v);
-    v._auto = v.hasAttribute('autoplay') || v.hasAttribute('loop');
+    v._auto = v.hasAttribute('autoplay');   // only what was meant to play by itself: Library clips have `loop` (for the hover) but must stay still
     if (v._auto) { v.removeAttribute('autoplay'); v.preload = 'metadata'; v.pause(); }
     io.observe(v);
   };
