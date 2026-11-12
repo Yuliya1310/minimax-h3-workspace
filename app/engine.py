@@ -375,6 +375,11 @@ class ComfyProcess:
         args = [str(py), "-s", "ComfyUI\\main.py", "--windows-standalone-build", "--disable-auto-launch",
                 "--listen", "127.0.0.1", "--port", str(self.port), "--preview-method", "auto"]
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:   # keep the previous run's log: after a crash and restart it holds the reason
+            if self.log_path.exists() and self.log_path.stat().st_size:
+                self.log_path.replace(self.log_path.with_name("comfyui.prev.log"))
+        except OSError:
+            pass
         log = open(self.log_path, "w", encoding="utf-8", errors="replace")
         self.proc = subprocess.Popen(args, cwd=self.root, stdout=log, stderr=subprocess.STDOUT,
                                      creationflags=CREATE_NO_WINDOW, env=local_env(self.root))

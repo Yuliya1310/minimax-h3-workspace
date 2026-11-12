@@ -271,6 +271,7 @@ class App:
                 self.start_managed()
         self.ws_task = asyncio.create_task(self.comfy_ws_loop())
         self.watchdog_task = asyncio.create_task(self.jobs_watchdog())
+        self.poller_task = asyncio.create_task(self.jobs_poller())
 
     def missing_node_packs(self):
         """Own ComfyUI: node packs from the catalog that are not in its custom_nodes yet (a newer app version may need more)."""
@@ -339,7 +340,7 @@ class App:
         names, found, entries = {}, set(), {}
         for role, variant in self.choice().items():
             entry = entries[role] = catalog.model_entry(role, variant)
-            picked = (self.config.get("model_pick") or {}).get(role)  # a file the user chose by hand
+            picked = (self.config.get("model_pick") or {}).get(role) if self.config.get("engine") != "managed" else None  # a file the user chose by hand (never in «Я новичок»: the set is fixed)
             def seen(file):
                 ok = {file, *catalog.FILE_ALIASES.get(file, ())}  # same file under another name (e.g. upscaler from Hugging Face)
                 return next((n for n in visible[entry["category"]] if n.replace("/", "\\").split("\\")[-1] in ok), None)
@@ -664,7 +665,8 @@ class App:
 
     async def h_status(self, _req):
         base = {"configured": bool(self.config.configured or self.comfy_override),
-                "engine": self.config.get("engine"), "installing": bool(self.installer)}
+                "engine": self.config.get("engine"), "installing": bool(self.installer),
+                "saved_modes": self.config.get("modes") or []}
         try:
             stats = await self.system_stats()
         except Exception:
@@ -830,6 +832,8 @@ class App:
                                   "picked": picked.get(role), "name": self.model_names.get(role)})
 
     async def h_models_pick(self, req):
+        if self.config.get("engine") == "managed":
+            raise web.HTTPForbidden(text="В режиме «Я новичок» модели подобраны и менять их нельзя: так всё работает без сбоев.")
         body = await req.json()
         role, name = body.get("role"), body.get("name") or ""
         if role not in catalog.VARIANTS:
@@ -1040,6 +1044,9 @@ class App:
         modes = [m for m in (body.get("modes") or self.modes()) if m in catalog.MODE_ROLES] or ["video"]
         if body.get("add_mode"):
             modes = sorted(set(self.modes()) | {body["add_mode"]}, key=list(catalog.MODE_ROLES).index)
+        if self.process:   # files of the old installation must not be in use
+            await asyncio.to_thread(self.process.stop)
+            self.process = None
         self.config.update(engine="managed", install_dir=install_dir, models_dir=models_dir,
                            choice=choice, profile=profile, modes=modes, setup_done=False)
         self.setup_log = []
@@ -1241,10 +1248,9 @@ class App:
         """Back to the first-run wizard; installed files stay where they are."""
         if self.installer:
             return web.json_response({"error": "Сначала остановите установку"}, status=409)
-        if self.process:
-            await asyncio.to_thread(self.process.stop)
-            self.process = None
-        self.config.update(setup_done=False)
+        # Opening the wizard must not undo the set-up: before, «Изменить настройки» cleared «setup_done» and stopped the
+        # engine, so closing the program with the wizard open left it «not configured» at the next start.
+        # The engine is stopped only when a new installation really starts (h_setup_install).
         return web.json_response({"ok": True})
 
     # ---------- cloud (RunningHub) ----------
@@ -1532,12 +1538,28 @@ class App:
         seed = int(form["seed"]) if form.get("seed", "").isdigit() else random.randrange(2 ** 50)
         return form, image, seed
 
+    async def need_relay_node(self):
+        """The fast upscale uses a node that ComfyUI has had only since 0.45.0: say so in plain words instead of a node error."""
+        try:
+            _, oi = await self.comfy_json("GET", "/object_info/RelayVSRConditioning", timeout=aiohttp.ClientTimeout(total=15))
+        except Exception:
+            return   # ComfyUI does not answer: the usual error will tell
+        if oi:
+            return
+        how = ("Закройте программу, откройте папку установки, затем ComfyUI_windows_portable\\update и запустите "
+               "update_comfyui.bat. После этого запустите программу снова." if self.config.get("engine") == "managed" else
+               "Обновите ComfyUI (в его папке update запустите update_comfyui.bat) и перезапустите его.")
+        raise web.HTTPBadRequest(text="Для быстрого увеличения нужен ComfyUI версии 0.45.0 или новее: в вашем нет нужной функции. " + how
+                                      + " Обычное («Качественнее — SeedVR2») работает и на старой версии.")
+
     async def h_upscale(self, req):
         """Improve the quality of a finished video or picture from the library (SeedVR2), the sound stays."""
         peek = await req.json()
         soft = peek.get("method") == "soft2k"  # "up to 2K", soft (pictures only)
         relay = peek.get("engine") == "relay"   # the fast RelayVSR x2 (video only) instead of SeedVR2
         await self.need_models("relayvsr" if relay else "upscale")
+        if relay:
+            await self.need_relay_node()
         if self.rh():
             raise web.HTTPBadRequest(text="Увеличение работает только на своём ComfyUI (не в облаке RunningHub).")
         body = peek
@@ -1582,6 +1604,8 @@ class App:
         relay = form.get("engine") == "relay"
         soft = form.get("method") == "soft2k"
         await self.need_models("relayvsr" if relay else "upscale")
+        if relay:
+            await self.need_relay_node()
         if self.rh():
             raise web.HTTPBadRequest(text="Увеличение работает только на своём ComfyUI (не в облаке RunningHub).")
         if soft and not pic:
@@ -1707,14 +1731,20 @@ class App:
                 raise web.HTTPBadRequest(text="Неверный размер холста")
             if not (320 <= w <= 4096 and 320 <= h <= 4096):
                 raise web.HTTPBadRequest(text="Слишком большой или маленький холст")
-            prompt = form.get("prompt", "").strip() or wf.OUTPAINT_PROMPT
+            user_text = form.get("prompt", "").strip()
+            prompt = wf.OUTPAINT_PROMPT + (f" Scene: {user_text}" if user_text else "")
             lora = None
             try:
                 _, loras = await self.comfy_json("GET", "/models/loras", timeout=aiohttp.ClientTimeout(total=15))
                 lora = next((f for f in (loras or []) if f.lower().endswith("qwen-image-2.1-outpaint-v2.safetensors")), None)
             except Exception:
                 pass
-            graph, stages = wf.qwen_outpaint_graph(self.model_names, prompt, image, form["_orig"], x, y, (w, h), seed, lora)
+            try:
+                ow, oh = int(form.get("ow", "0")), int(form.get("oh", "0"))
+            except ValueError:
+                ow = oh = 0
+            graph, stages = wf.qwen_outpaint_graph(self.model_names, prompt, image, form["_orig"], x, y, (w, h), seed, lora,
+                                                   (ow, oh) if ow > 0 and oh > 0 else None)
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Расширение изображения", "prompt": prompt, "aspect": "",
                 "q": "", "len": 0.0, "res": f"{w}×{h}", "seed": seed})
@@ -1789,7 +1819,12 @@ class App:
         except ValueError:
             x, y = 0, 0
         mp = wf.QWEN_MP.get(form.get("size", "1"), 1.0)
-        graph, stages = wf.qwen_inpaint_graph(self.model_names, prompt, image, form["_crop"], form["_mask"], x, y, mp, seed)
+        try:
+            cw, ch = int(form.get("cw", "0")), int(form.get("ch", "0"))
+        except ValueError:
+            cw = ch = 0
+        graph, stages = wf.qwen_inpaint_graph(self.model_names, prompt, image, form["_crop"], form["_mask"], x, y, mp, seed,
+                                              (cw, ch) if cw > 0 and ch > 0 else None)
         return await self.queue(graph, stages, {
             "mode": "qwen", "sub": "Инпейнт", "prompt": prompt, "aspect": "",
             "q": "", "len": 0.0, "res": "", "seed": seed})
@@ -1861,7 +1896,7 @@ class App:
     def custom_loras(self, mode=None):
         """(file, strength) for the LoRAs the user added by hand on the Models screen (not used with the cloud).
         A LoRA can be switched off in single modes (right in the mode, in the «Модель» row): its `skip` lists those modes."""
-        if self.rh():
+        if self.rh() or self.config.get("engine") == "managed":   # «Я новичок»: only the LoRAs of the ready workflows
             return []
         return [(x["file"], float(x["strength"])) for x in self.unique_loras() if x.get("on", True) and mode not in (x.get("skip") or [])]
 
@@ -1886,6 +1921,8 @@ class App:
         return web.json_response({"files": files or [], "items": items})
 
     async def h_loras_custom_set(self, req):
+        if self.config.get("engine") == "managed":
+            raise web.HTTPForbidden(text="В режиме «Я новичок» свои LoRA не подключаются: всё уже настроено.")
         items = []
         for x in (await req.json()).get("items", [])[:10]:
             try:
@@ -1997,9 +2034,12 @@ class App:
             raise web.HTTPBadRequest(text=f"Видео слишком короткое для продолжения: в нём {frames} кадров, нужно не меньше {need} (около 2,5 секунд).")
         return (name, frames)
 
-    async def preview_opts(self):
-        """Settings for the animated live preview, or None when ComfyUI has no KJNodes' Model Preview Override."""
-        return None   # switched off: the animated preview made generation noticeably slower; the usual single-frame preview is used
+    async def preview_opts(self, mode=None):
+        """Settings for the animated live preview, or None when ComfyUI has no KJNodes' Model Preview Override.
+        Only the action scenes use it (there the motion is what has to be judged, as in the original workflow); in the
+        other modes it is off: the animated preview made generation noticeably slower, the usual single-frame preview is used."""
+        if mode != "action":
+            return None
         try:
             status, oi = await self.comfy_json("GET", "/object_info/ModelPreviewOverrideKJ")
         except Exception:
@@ -2146,7 +2186,7 @@ class App:
             if "vocal_model" in {m["role"] for m in self.missing} or "vocal_model" not in self.model_names:
                 raise web.HTTPBadRequest(text="Для «Только вокал» нужна модель MelBand. Скачайте её в разделе «Настройки».")
             vocals = self.model_names["vocal_model"]
-        no_pika = form.get("accel") == "old"   # «Без Pika»: the quality route without a speed LoRA (12 steps), for those whom Pika gives trouble
+        no_pika = form.get("accel") == "old" and self.config.get("engine") != "managed"   #«Без Pika»: the quality route without a speed LoRA (12 steps), for those whom Pika gives trouble
         if not no_pika and "pika_lora" in {m["role"] for m in self.missing}:
             raise web.HTTPBadRequest(text="Файл Pika (pika_h3_flex_turbo_8step_hd_ref2va) не найден. Скачайте его в разделе «Настройки» или выберите «Без Pika».")
         fin = None if no_pika else self.model_names["pika_lora"]
@@ -2420,7 +2460,7 @@ class App:
         _, oi = await self.comfy_json("GET", "/object_info/SelfLiftH3Sampler")
         _, oi2 = await self.comfy_json("GET", "/object_info/H3SigmaRefiner")
         _, loras = await self.comfy_json("GET", "/models/loras")
-        dmad = next((n for n in loras or [] if catalog.ACTION_DMAD_LORA in n), None)
+        dmad = next((n for n in loras or [] if catalog.is_action_dmad(n)), None)
         missing = {m["role"] for m in self.missing}
         have_up = "action_upscaler" not in missing
         nodes = bool(oi) and bool(oi2)
@@ -2446,7 +2486,7 @@ class App:
             # on RunningHub only built-in nodes are assumed; LoRAs are used if the user's RH workflow has them
             rh_files = {n.replace("\\", "/").split("/")[-1].lower(): n for n in (getattr(self, "rh_models", None) or [])}
             speed = rh_files.get(catalog.VARIANTS["speed_slider_lora"]["v1.1"]["file"].lower())
-            dmad = next((n for b, n in rh_files.items() if catalog.ACTION_DMAD_LORA in b), None)
+            dmad = next((n for b, n in rh_files.items() if catalog.is_action_dmad(b)), None)
             s = {"faithful": False, "dmad": dmad, "speed": speed}
         else:
             s = await self.action_setup()
@@ -2458,8 +2498,9 @@ class App:
         loras += self.custom_loras("action")
         names = dict(self.model_names)
         width, height = wf.resolution(aspect, quality, form)
+        preview = await self.preview_opts("action") if form.get("preview") != "0" and not self.rh() else None
         graph, stages = wf.action_graph(names, wf.lipsync_prompt(prompt, len(images)), width, height, seconds, seed, images, audios,
-                                        s["faithful"], loras)
+                                        s["faithful"], loras, preview)
         if s["faithful"]:
             # the refiner's input names come from the installed node; values as in the original workflow
             req_inputs = [k for k in (s["refiner_def"]["input"].get("required") or {}) if k != "sigmas"]
@@ -2647,6 +2688,34 @@ class App:
                     else:
                         await self._stale_job(job, "Связь с ComfyUI прервалась: задание потеряно. "
                                                    "Отправьте генерацию ещё раз.")
+
+    async def jobs_poller(self):
+        """Safety net: if the events of ComfyUI never reach the app (a stale connection), a finished job would hang in
+        the window on «В очереди» for minutes. Every few seconds ask the history about jobs that have been quiet."""
+        while True:
+            await asyncio.sleep(4)
+            try:
+                if self.rh() or not self.jobs:
+                    continue
+                now = asyncio.get_event_loop().time()
+                for pid, job in list(self.jobs.items()):
+                    if job.get("task") or pid not in self.jobs:
+                        continue
+                    if now - job.get("last_ev", job.get("t0", now)) < 12:
+                        continue
+                    _, hist = await self.comfy_json("GET", f"/history/{pid}", timeout=aiohttp.ClientTimeout(total=10))
+                    entry = (hist or {}).get(pid)
+                    if not entry or pid not in self.jobs:
+                        continue
+                    st = (entry.get("status") or {})
+                    if st.get("status_str") == "success" or st.get("completed"):
+                        self.note_error(f"Результат забран из истории ComfyUI: события о конце задания не пришли (задание {pid[:8]})")
+                        await self.finish_job(job)
+                    elif st.get("status_str") == "error":
+                        msgs = [m[1].get("exception_message", "") for m in st.get("messages", []) if m[0] == "execution_error"]
+                        await self._stale_job(job, "Ошибка генерации в ComfyUI: " + (msgs[0].strip() if msgs else "неизвестная ошибка"))
+            except Exception:
+                continue
 
     async def _stale_job(self, job, message):
         pid = job["prompt_id"]

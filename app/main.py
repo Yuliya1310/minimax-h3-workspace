@@ -64,6 +64,23 @@ class JsApi:
         self._window = None
         self._port = port
 
+    def restart_app(self):
+        """Close the program and open it again (as if the user left and came back): a hidden helper waits until this
+        process has fully exited (the managed ComfyUI is stopped on the way) and then starts the program anew."""
+        import subprocess
+        try:
+            cmd = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, os.path.abspath(sys.argv[0])]
+            quote = lambda s: "'" + s.replace("'", "''") + "'"
+            ps = (f"Wait-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; "
+                  f"Start-Process -FilePath {quote(cmd[0])}" + (f" -ArgumentList {quote(cmd[1])}" if len(cmd) > 1 else "") +
+                  f" -WorkingDirectory {quote(os.path.dirname(cmd[0]) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(sys.argv[0])))}")
+            subprocess.Popen(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                             creationflags=0x08000000 | 0x00000200, close_fds=True)   # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP (DETACHED_PROCESS leaves PowerShell without a console and it dies)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        threading.Timer(0.5, lambda: self._window.destroy()).start()   # lets this call answer first; webview.start() then returns
+        return {"ok": True}
+
     def pick_folder(self, start=""):
         import webview
         res = self._window.create_file_dialog(webview.FOLDER_DIALOG, directory=start if os.path.isdir(start) else "")
@@ -175,7 +192,7 @@ def main():
         except Exception:
             pass
         api = JsApi(port)
-        api._window = webview.create_window("Minimax H3 Workspace", url, width=1440, height=920, min_size=(1000, 680), maximized=True,   # opens on the whole screen (the taskbar stays visible)
+        api._window = webview.create_window("Minimax H3 Workspace", url, width=1440, height=920, min_size=(1000, 680),   # opens as a normal window (1.1.11-1.1.13 opened maximized: suspected of using more video memory)
                                            background_color="#12070a", js_api=api,
                                            draggable=True)  # pywebview blocks dragging of every picture by default; the app drags pictures into slots
         # watchdog for a half-broken WebView2 (e.g. Edge removed by hand): the version check above passes,

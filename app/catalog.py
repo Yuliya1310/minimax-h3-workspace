@@ -4,11 +4,11 @@ Every model has a role (what the workflows use it for). A role can have several
 variants; `choose_models` picks one per role from the detected hardware.
 """
 
-COMFY_VERSION = "0.43.0"
+COMFY_VERSION = "0.45.0"   # 0.43.0 has no RelayVSR (fast video upscale); 0.45.0 is the first with it
 MIN_DRIVER = 580  # the bundled PyTorch is built for CUDA 13
 COMFY_URL = ("https://github.com/Comfy-Org/ComfyUI/releases/download/"
              f"v{COMFY_VERSION}/ComfyUI_windows_portable_nvidia.7z")
-COMFY_SIZE = 2_040_000_000
+COMFY_SIZE = 2_071_479_423
 COMFY_DIRNAME = "ComfyUI_windows_portable"
 
 # Downloaded as GitHub archives of a fixed commit, so users need no git.
@@ -26,6 +26,12 @@ NODE_PACKS = [
     # memory savers (MiniMaxChunkFeedForward, MiniMaxLowVRAMAttention) used by the long video graphs
     {"name": "ComfyUI-KJNodes", "repo": "kijai/ComfyUI-KJNodes",
      "commit": "ab72eda7ffad6280422d71ab7d54d3fb87c0ba18"},
+    # the «точная копия» of the action workflow (Prompt Mastery): 8 + 4 steps with the SelfLift sampler and a finishing step.
+    # Both packs were read before they were added: no network, no shell, no exec, no extra pip packages; pinned commits.
+    {"name": "comfyui-SelfLift", "repo": "facok/comfyui-SelfLift",
+     "commit": "835c3cf7919410f71f414688f049c6ca497789d0"},          # no LICENSE file in the repository
+    {"name": "ComfyUI-YCNodes-MiniMax-H3", "repo": "yichengup/ComfyUI-YCNodes-MiniMax-H3",   # MIT; the version the workflow was made with
+     "commit": "efbe83f69ffa97a251a575ce42edc7bf8005da0c"},
 ]
 
 # What each mode needs from custom nodes: checked in a user's own ComfyUI (a new install gets them by itself).
@@ -41,6 +47,10 @@ NODE_CHECKS = [
      "optional": False, "why": "видео, в котором меняем персонажа"},
     {"pack": "ComfyUI-KJNodes", "classes": ["MiniMaxChunkFeedForward", "MiniMaxLowVRAMAttention"], "modes": ["long"],
      "optional": False, "why": "экономия видеопамяти в длинном видео"},
+    {"pack": "comfyui-SelfLift", "classes": ["SelfLiftH3Sampler"], "modes": ["action"],
+     "optional": True, "why": "точный режим экшн-сцен (чище картинка)"},
+    {"pack": "ComfyUI-YCNodes-MiniMax-H3", "classes": ["H3SigmaRefiner"], "modes": ["action"],
+     "optional": True, "why": "точный режим экшн-сцен (доводочный шаг)"},
 ]
 
 
@@ -63,6 +73,8 @@ def _m(repo, path, size_gb, category, name=None, sub=SUB):
 # the same file is published under two names; either one counts as present
 FILE_ALIASES = {
     "minimax_h3_latent_upscaler_3d_bf16.safetensors": ("minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors",),
+    # the SelfLift upscaler of the action workflow is also published in full precision under this name
+    "h3_upscaler_lms_v0.1.safetensors": ("h3_upscaler_lms_v0.1_fp32.safetensors",),
 }
 
 VARIANTS = {
@@ -190,6 +202,11 @@ VARIANTS = {
         "int8": _m("Comfy-Org/Qwen-Image-2.1", "text_encoders/qwen3vl_8b_int8_convrot.safetensors", 9.35,
                    "text_encoders", sub=IMG_SUB),
     },
+    # «Расширение» (outpaint): this LoRA was trained on a flat gray fill and on one instruction sentence; without it the
+    # model moves the picture and the stitched original does not line up
+    "outpaint_lora": {
+        "v2": _m("ausboss/Qwen-Image-2.1-Outpaint-LoRA", "qwen-image-2.1-outpaint-v2.safetensors", 0.159, "loras", sub=IMG_SUB),
+    },
     "qwen_vae": {
         "bf16": _m("Comfy-Org/Qwen-Image-2.1", "vae/qwen_image_2.1_vae_bf16.safetensors", 0.68, "vae", sub=IMG_SUB),
     },
@@ -217,7 +234,7 @@ ROLE_MARKS = {
     "realism_lora": ["realism"], "motion_repair_lora": ["motion"], "pika_lora": ["pika"], "swap_lora": ["swap"], "sla_lora": ["sla"],
     "seedvr_unet": ["seedvr"], "seedvr_vae": ["seedvr"], "relayvsr_unet": ["relayvsr"], "relayvsr_vae": ["relayvsr"], "krea_clip": ["qwen3vl", "qwen3-vl"],
     "krea_vae": ["qwen_image", "qwen-image"], "kreareal_unet": ["krea"], "kreareal_lora": ["realism"],
-    "qwen_unet": ["qwen"], "qwen_clip": ["qwen3vl", "qwen3-vl"], "qwen_vae": ["qwen"],
+    "qwen_unet": ["qwen"], "qwen_clip": ["qwen3vl", "qwen3-vl"], "qwen_vae": ["qwen"], "outpaint_lora": ["outpaint"],
     "flux_unet": ["flux"], "flux_clip": ["qwen_3", "qwen3"], "flux_vae": ["flux"],
 }
 
@@ -260,6 +277,19 @@ VARIANT_LABELS = {
 
 # LoRA from the original action workflow that has no public download; used when the user has it
 ACTION_DMAD_LORA = "minimax_h3_dmad_full_dareties_v4_step600_comfy_fro"
+# The action workflow of Prompt Mastery names its DMAD LoRA «minimax_h3_dmad_full_dareties_v4_step600_comfy_fro»; the same
+# training (dareties v4, step 600, fro) is published as «minimax_h3_fl2v_lightx2v_v0.1_dareties_v4_step600_comfy_fro»
+# (huggingface.co/silveroxides/MiniMax-H3_tests, 867 MB). Both file names are accepted, and only the plain «…_fro»
+# versions: «…_fro_fulladaln», «…_rev6_…» are other files.
+ACTION_DMAD_FILES = (ACTION_DMAD_LORA + ".safetensors", "minimax_h3_fl2v_lightx2v_v0.1_dareties_v4_step600_comfy_fro.safetensors",
+                     # the author's own page (civitai.com/models/2837571, «Minimax H3 Turbo LoRAs», version dmad_larryvrhv4_merge)
+                     # publishes it without the «_fro» tail
+                     "minimax_h3_dmad_full_dareties_v4_step600_comfy.safetensors")
+
+
+def is_action_dmad(name):
+    base = str(name).replace("/", "\\").split("\\")[-1].lower()
+    return base in ACTION_DMAD_FILES
 
 ROLE_TITLES = {
     "fast_unet": "Основная модель — Image-to-Video (FastH3)",
@@ -291,6 +321,7 @@ ROLE_TITLES = {
     "qwen_unet": "Основная модель — Правка изображения (Qwen Image 2.1)",
     "qwen_clip": "Текстовый энкодер Qwen (Qwen3-VL 8B)",
     "qwen_vae": "VAE для Qwen Image 2.1",
+    "outpaint_lora": "LoRA «Расширение изображения» (Qwen, без неё края не дорисовываются)",
     "flux_unet": "Основная модель — Правка изображения для коммерции (FLUX.2 klein 4B)",
     "flux_clip": "Текстовый энкодер FLUX.2 klein (Qwen3 4B)",
     "flux_vae": "VAE для FLUX.2",
@@ -328,6 +359,7 @@ MODE_OPTIONAL = {
     "swap": ["pika_lora", "realism_lora", "motion_repair_lora"],
     "action": ["speed_slider_lora", "action_upscaler"],
     "long": ["vocal_model"],
+    "qwen": ["outpaint_lora"],
 }
 ALL_ROLES = list(VARIANTS)
 
@@ -337,7 +369,7 @@ DEFAULT_CHOICE = {"fast_unet": "int8", "lipsync_unet": "full", "text_encoder": "
                   "action_unet": "int8", "speed_slider_lora": "v1.1", "action_upscaler": "lms", "vocal_model": "fp16",
                   "realism_lora": "v1", "motion_repair_lora": "v1", "pika_lora": "hd8", "swap_lora": "v15", "sla_lora": "bf16",
                   "krea_unet": "int8", "krea_clip": "fp8", "krea_vae": "bf16", "kreareal_unet": "fp8", "kreareal_lora": "v2",
-                  "qwen_unet": "int8", "qwen_clip": "int8", "qwen_vae": "bf16",
+                  "qwen_unet": "int8", "qwen_clip": "int8", "qwen_vae": "bf16", "outpaint_lora": "v2",
                   "flux_unet": "fp8", "flux_clip": "bf16", "flux_vae": "bf16",
                   "seedvr_unet": "int8", "seedvr_vae": "fp16", "relayvsr_unet": "x2", "relayvsr_vae": "x2"}
 

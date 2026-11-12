@@ -821,7 +821,7 @@ def long_part_graph(m, scenes, k, width, height, seed, images, audio=None, start
 ACTION_LOWRES = 0.6  # SelfLift lowres_scale in the original
 
 
-def action_graph(m, prompt, width, height, seconds, seed, images, audios, faithful, loras):
+def action_graph(m, prompt, width, height, seconds, seed, images, audios, faithful, loras, preview=None):
     """PM Minimax H3 Best Action Workflow (Prompt Mastery): hybrid model, sol-attn, 8 low-res + 4 high-res steps.
 
     faithful=True runs the original SelfLiftH3Sampler + H3SigmaRefiner; otherwise the same schedule is
@@ -842,7 +842,15 @@ def action_graph(m, prompt, width, height, seconds, seed, images, audios, faithf
             "dense_blocks": "", "min_tokens": 12288, "extra_tokens": 256, "sink_conditioning": "exact_kv_and_rows",
             "verbose": False}},
         "7": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["3", 0], "shift_video": 12.0, "shift_audio": 3.0}},
-        "10": {"class_type": "BasicScheduler", "inputs": {"model": ["7", 0], "scheduler": "simple", "steps": 12, "denoise": 1.0}},
+    })
+    mdl = ["7", 0]
+    if preview:   # the animated live preview of the original workflow: sits right after the sigma shift, everything below uses it
+        g["30"] = {"class_type": "ModelPreviewOverrideKJ", "inputs": {
+            "model": ["7", 0], "max_resolution": 1024, "jpeg_quality": 80, "suppress_default_preview": True,
+            "preview_frames": 1024, "preview_fps": 12, "tiny_vae": preview.get("tiny_vae", "none"), "vae": ["5", 0]}}
+        mdl = ["30", 0]
+    g.update({
+        "10": {"class_type": "BasicScheduler", "inputs": {"model": mdl, "scheduler": "simple", "steps": 12, "denoise": 1.0}},
         "11": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
         "12": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
     })
@@ -855,10 +863,11 @@ def action_graph(m, prompt, width, height, seconds, seed, images, audios, faithf
             "13": {"class_type": "H3SigmaRefiner", "inputs": {
                 "sigmas": ["10", 0], "extra_steps": 1, "strength": 0.7, "offset": 0.0, "curve": "cosine"}},
             "14": {"class_type": "SelfLiftH3Sampler", "inputs": {
-                "model": ["7", 0], "positive": ["8", 0], "negative": ["9", 0], "vae": ["5", 0],
+                "model": mdl, "positive": ["8", 0], "negative": ["9", 0], "vae": ["5", 0],
                 "latent_image": ["8", 1], "sampler": ["12", 0], "sigmas": ["13", 0], "seed": seed, "cfg": 1.0,
                 "transition_step": 8, "lowres_scale": ACTION_LOWRES, "rho": 0.0, "w_min": 0.5, "w_max": 1.0,
-                "upscaler_model": m["action_upscaler"], "highres_tiling": True}},
+                "upscaler_model": m["action_upscaler"], "highres_tiling": True,
+                "upscaler_unload": True}},   # as in the original workflow: the upscaler leaves the video memory after use
             "20": {"class_type": "VAEDecode", "inputs": {"samples": ["14", 0], "vae": ["5", 0]}},
             "21": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["14", 0], "vae": ["6", 0]}},
         })
@@ -869,7 +878,7 @@ def action_graph(m, prompt, width, height, seconds, seed, images, audios, faithf
             "8": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
                 "clip": ["4", 0], "vae": ["5", 0], "audio_vae": ["6", 0], "prompt": prompt,
                 "width": lw, "height": lh, "length": frames(seconds), "ref_image_size": "max"}},
-            "13": {"class_type": "BasicGuider", "inputs": {"model": ["7", 0], "conditioning": ["8", 0]}},
+            "13": {"class_type": "BasicGuider", "inputs": {"model": mdl, "conditioning": ["8", 0]}},
             "9": {"class_type": "SplitSigmas", "inputs": {"sigmas": ["10", 0], "step": 8}},
             "14": {"class_type": "SamplerCustomAdvanced", "inputs": {
                 "noise": ["11", 0], "guider": ["13", 0], "sampler": ["12", 0], "sigmas": ["9", 0], "latent_image": ["8", 1]}},
@@ -893,6 +902,8 @@ def action_graph(m, prompt, width, height, seconds, seed, images, audios, faithf
     })
     loaders = _refs(g, "8", images, (), audios)
     stages = {n: "load" for n in ["1", "2", "3", "4", "5", "6", "7"] + [k for k in g if k.isdigit() and 60 <= int(k) < 70]}
+    if preview:
+        stages["30"] = "load"
     stages.update({n: "encode" for n in ["8"] + loaders})
     stages.update(sample_stages)
     stages.update({"20": "decode", "21": "decode", "22": "save", "23": "save"})
@@ -1386,24 +1397,34 @@ def qwen_edit_graph(m, prompt, image, megapixels, seed, size=None, extras=()):
     return _qwen_base(m, image, megapixels, prompt, seed, size, extras)
 
 
-def qwen_inpaint_graph(m, prompt, image, crop, mask, x, y, megapixels, seed):
+def qwen_inpaint_graph(m, prompt, image, crop, mask, x, y, megapixels, seed, size=None):
     """Local edit like the proven crop-and-stitch inpainting: Qwen Image 2.1 redraws only the masked area.
     `crop`/`mask` are the picture cut around the painted region (client-side), `x`/`y` its place in the original
-    `image`. The crop is scaled to ~megapixels for the model; the mask is scaled with the very same node and
-    settings, then ImageCompositeMasked pastes the redrawn crop back over the untouched original."""
+    `image`, `size` = (width, height) of that crop. The crop is scaled to ~megapixels for the model, so the redrawn
+    patch comes back at that size: it MUST be scaled back to the size of the crop before it is pasted at x,y
+    (without it the patch lands enlarged and shifted). The mask keeps the size of the crop."""
+    prompt = prompt.rstrip() + (" Keep the line art, outlines, shading and colors of the surrounding picture; "
+                                "the redrawn part must continue the existing lines seamlessly.")
     g, stages = _qwen_base(m, crop, megapixels, prompt, seed)
-    g["12"] = {"class_type": "MaskToImage", "inputs": {"mask": ["21", 1]}}
-    g["13"] = {"class_type": "ImageScaleToTotalPixels", "inputs": {
-        "upscale_method": "lanczos", "megapixels": megapixels, "resolution_steps": 32, "image": ["12", 0]}}
-    g["14"] = {"class_type": "ImageToMask", "inputs": {"channel": "red", "image": ["13", 0]}}
-    # LoadImage's MASK output is 1-alpha (transparent counts as 1), so invert to get «painted area» back
-    g["19"] = {"class_type": "InvertMask", "inputs": {"mask": ["14", 0]}}
+    g["19"] = {"class_type": "InvertMask", "inputs": {"mask": ["21", 1]}}   # LoadImage's MASK is 1-alpha: invert = «painted area»
+    # a hard edge cuts the lines at the border of the paint: grow the mask a little and soften its edge, so the redrawn
+    # part melts into the original instead of leaving a seam (the edge zone is only a few pixels wide)
+    g["24"] = {"class_type": "GrowMask", "inputs": {"mask": ["19", 0], "expand": 6, "tapered_corners": True}}
+    g["25"] = {"class_type": "MaskToImage", "inputs": {"mask": ["24", 0]}}
+    g["26"] = {"class_type": "ImageBlur", "inputs": {"image": ["25", 0], "blur_radius": 5, "sigma": 2.5}}
+    g["27"] = {"class_type": "ImageToMask", "inputs": {"image": ["26", 0], "channel": "red"}}
     g["20"] = {"class_type": "LoadImage", "inputs": {"image": image}}
     g["21"] = {"class_type": "LoadImage", "inputs": {"image": mask}}
+    src = ["10", 0]
+    if size and size[0] > 0 and size[1] > 0:
+        g["23"] = {"class_type": "ImageScale", "inputs": {"upscale_method": "lanczos", "width": int(size[0]), "height": int(size[1]),
+                                                           "crop": "disabled", "image": ["10", 0]}}
+        src = ["23", 0]
+        stages["23"] = "decode"
     g["22"] = {"class_type": "ImageCompositeMasked", "inputs": {
-        "destination": ["20", 0], "source": ["10", 0], "mask": ["19", 0], "x": x, "y": y, "resize_source": False}}
+        "destination": ["20", 0], "source": src, "mask": ["27", 0], "x": x, "y": y, "resize_source": False}}
     g["11"]["inputs"]["images"] = ["22", 0]
-    stages.update({"12": "encode", "13": "encode", "14": "encode", "19": "encode",
+    stages.update({"19": "encode", "24": "encode", "25": "encode", "26": "encode", "27": "encode",
                    "20": "load", "21": "load", "22": "decode"})
     return g, stages
 
@@ -1413,19 +1434,40 @@ BG_REMOVE_PROMPT = (
     "Keep the subject exactly as in <image1> — the same face, hair, clothes, colors, edges and style. "
     "Do not change, redraw or add anything in the subject itself.")
 
-OUTPAINT_PROMPT = "Extend and continue this picture naturally beyond its edges, keeping the same style, light and subject."
+# The outpaint LoRA (qwen-image-2.1-outpaint-v2) was trained on this exact first sentence and on a flat gray (#808080)
+# fill of the new areas; the user's text goes after it as «Scene: …». Without the sentence the model just copies the fill.
+OUTPAINT_PROMPT = "Outpaint the image: replace the solid gray areas with a seamless continuation of the scene, keeping the existing picture unchanged."
 
 
-def qwen_outpaint_graph(m, prompt, canvas, orig, x, y, size, seed, outpaint_lora=None):
+def qwen_outpaint_graph(m, prompt, canvas, orig, x, y, size, seed, outpaint_lora=None, osize=None):
     """Extend a picture: `canvas` is the original placed at x,y on the new larger `size`; the model paints the whole
     canvas (with the special outpaint LoRA when the user has it), then the untouched original is pasted back over
     its place, so only the new edges come from the model."""
-    g, stages = _qwen_base(m, canvas, 1.0, prompt, seed, size)
+    # the model must see the canvas at the size it draws: a smaller reference makes the redrawn middle sit a few pixels
+    # off the original, and the blended seam then shows as double, glassy stripes
+    g, stages = _qwen_base(m, canvas, max(0.25, size[0] * size[1] / 1e6), prompt, seed, size)
     if outpaint_lora:
         g["23"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
             "model": ["4", 0], "lora_name": outpaint_lora, "strength_model": 1.0}}
         g["9"]["inputs"]["model"] = ["23", 0]
         stages["23"] = "load"
+    if osize and osize[0] > 0 and osize[1] > 0:
+        # soft seam: a hard paste of the original leaves a visible edge (colour jump, cut lines). The original is kept
+        # only inside a rectangle that is shrunk by a few pixels and blurred, so it melts into what the model drew there.
+        # The mask is made on the whole canvas; the sides that touch the border of the canvas keep the original fully.
+        W, H = int(size[0]), int(size[1])
+        g["30"] = {"class_type": "SolidMask", "inputs": {"value": 0.0, "width": W, "height": H}}
+        g["31"] = {"class_type": "SolidMask", "inputs": {"value": 1.0, "width": int(osize[0]), "height": int(osize[1])}}
+        g["32"] = {"class_type": "MaskComposite", "inputs": {"destination": ["30", 0], "source": ["31", 0], "x": x, "y": y, "operation": "add"}}
+        g["33"] = {"class_type": "GrowMask", "inputs": {"mask": ["32", 0], "expand": -6, "tapered_corners": False}}
+        g["34"] = {"class_type": "MaskToImage", "inputs": {"mask": ["33", 0]}}
+        g["35"] = {"class_type": "ImageBlur", "inputs": {"image": ["34", 0], "blur_radius": 5, "sigma": 2.5}}
+        g["36"] = {"class_type": "ImageToMask", "inputs": {"image": ["35", 0], "channel": "red"}}
+        g["22"] = {"class_type": "ImageCompositeMasked", "inputs": {
+            "destination": ["10", 0], "source": ["5", 0], "mask": ["36", 0], "x": 0, "y": 0, "resize_source": False}}
+        g["11"]["inputs"]["images"] = ["22", 0]
+        stages.update({"30": "encode", "31": "encode", "32": "encode", "33": "encode", "34": "encode", "35": "encode", "36": "encode", "22": "decode"})
+        return g, stages
     g["20"] = {"class_type": "LoadImage", "inputs": {"image": orig}}
     g["22"] = {"class_type": "ImageCompositeMasked", "inputs": {
         "destination": ["10", 0], "source": ["20", 0], "x": x, "y": y, "resize_source": False}}

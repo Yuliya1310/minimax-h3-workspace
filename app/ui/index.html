@@ -73,9 +73,11 @@
 .q-big i{display:block;height:100%;border-radius:6px;background:var(--grad);transition:width .4s,background .3s}
 .q-big.warn i{background:#e8a317}.q-big.bad i{background:#e5484d;animation:pblink 1s infinite}
 .q-row .pbox-chip{margin-top:6px;font-size:12.5px}
-.dock{position:fixed;right:18px;bottom:18px;z-index:40;width:min(360px,calc(100vw - 36px));padding:12px 14px;border-radius:14px;background:var(--surface);border:1px solid var(--line-2);box-shadow:0 10px 30px rgba(0,0,0,.35);cursor:pointer}
+.dock{position:fixed;right:12px;top:6px;z-index:41;width:min(240px,calc(100vw - 24px));padding:6px 10px;border-radius:12px;background:var(--surface);border:1px solid var(--line-2);box-shadow:0 6px 20px rgba(0,0,0,.35);cursor:pointer}   /* the job progress sits in the free corner at the top, it no longer covers the buttons at the bottom */
+.dock.ok .pbox-chip{display:none}
+.dock .pbox-bar{margin:0}
 .dock.bad{border-color:#e5484d}.dock.warn .pbox-bar i{background:#e8a317}.dock.bad .pbox-bar i{background:#e5484d;animation:pblink 1s infinite}
-.dock-t{display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-bottom:8px}
+.dock-t{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin-bottom:5px}
 .dock-t b:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dock .pbox-chip{margin-top:8px;font-size:12.5px}
 .cmp-in{position:relative;aspect-ratio:16/9;max-height:72vh;width:100%;margin:auto;background:#000;border-radius:10px;overflow:hidden;touch-action:none;cursor:ew-resize;user-select:none}
@@ -217,10 +219,16 @@ body.nosb-on #sbRs{display:none}
 .opt[data-opt="cloud"],#optCloudShow,#mdCloudBox{display:none!important}
 body.cloud-on #mdCloudBox{display:block!important}
 /* pinned bar of all sections (video, images): switch without going back to «Главная» */
-#modeBar{position:fixed;top:10px;left:calc(var(--sbw,248px) + 104px);right:300px;z-index:34;height:34px;display:flex;align-items:center;gap:4px;overflow-x:auto;white-space:nowrap;scrollbar-width:none}
+#modeBar{position:fixed;top:10px;left:calc(var(--sbw,248px) + 104px);right:262px;z-index:34;height:34px;display:flex;align-items:center;gap:3px;overflow-x:auto;white-space:nowrap;scrollbar-width:none}
 #modeBar::-webkit-scrollbar{display:none}
 body.nosb-on #modeBar{left:112px}
-#modeBar .mb{flex:none;display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border-radius:9px;border:1px solid var(--line-2);background:var(--surface);color:var(--text);font-size:12.5px;font-weight:600;cursor:pointer;opacity:.85}
+/* «Я новичок» (own engine of the app): everything is set up and fixed; nothing that can break it is shown (own model / LoRA, Pika switch, own Gemma and whisper) */
+body.beginner .mdl-pick,body.beginner #clCard,body.beginner #agOwn,body.beginner #agWh,body.beginner .lm-acc,body.beginner .lm-acc+.hint{display:none!important}
+/* solid strip behind the top buttons: scrolled content goes under it instead of showing through between the buttons */
+body::after{content:"";position:fixed;top:0;left:var(--sbw,248px);right:16px;height:52px;background:var(--bg);z-index:33;pointer-events:none}
+body.nosb-on::after{left:0}
+@media (max-width:1000px){body::after{height:0}}
+#modeBar .mb{flex:none;display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 8px;border-radius:9px;border:1px solid var(--line-2);background:var(--surface);color:var(--text);font-size:12.5px;font-weight:600;cursor:pointer;opacity:.85}
 #modeBar .mb svg{width:15px;height:15px}
 #modeBar .mb:hover{opacity:1;border-color:var(--accent)}
 #modeBar .mb.on{opacity:1;border-color:var(--accent);background:var(--accent-soft,var(--surface-2));color:var(--accent)}
@@ -263,11 +271,12 @@ body.nosb-on #modeBar{left:112px}
 .meter{display:grid;gap:5px}
 .side-foot .stat b{font-variant-numeric:tabular-nums}
 .side-foot .stat small{color:var(--dim);font-size:11px}
-.rep-btn{display:flex;align-items:center;justify-content:center;gap:8px;margin:0 0 12px;padding:9px 10px;border-radius:11px;border:1px solid rgba(var(--accent-rgb),.45);background:var(--accent-soft);color:var(--text);font-weight:700;font-size:12.5px;width:100%;transition:.15s;flex:none}
-.rep-btn svg{width:16px;height:16px}
+.rep-btn{display:flex;align-items:center;justify-content:flex-start;text-align:left;gap:11px;margin:0 0 12px;padding:10px 11px;border-radius:11px;border:1px solid rgba(var(--accent-rgb),.45);background:var(--accent-soft);color:var(--text);font-weight:700;font-size:12.5px;width:100%;transition:.15s;flex:none}
+.rep-btn svg{width:18px;height:18px;flex:none}
 .rep-btn:hover{color:var(--text);border-color:var(--accent)}
 .rep-btn[disabled]{opacity:.6;cursor:default}
-.sup-btn{display:block;margin:-4px 0 12px;padding:4px 10px;width:100%;text-align:center;font-size:12px;color:var(--muted);font-weight:600;border-radius:9px;flex:none}
+.sup-btn{display:block;margin:-4px 0 12px;padding:4px 11px;width:100%;text-align:left;font-size:12.5px;color:var(--muted);font-weight:600;border-radius:9px;flex:none}
+.sup-btn .heart{color:#ff5c8a;margin-right:6px;display:inline-block;width:18px;text-align:center;font-size:14px}
 .sup-btn:hover{color:var(--text)}
 @media (max-height:760px){.side-foot{gap:6px;padding:10px 12px}.side-foot .stat{font-size:11.5px}}
 
@@ -276,6 +285,8 @@ body.nosb-on #modeBar{left:112px}
 .view{display:none;padding:28px clamp(20px,2.2vw,44px) 40px}
 .view.active{display:block;animation:fade .25s ease}
 html.bg-hidden *{animation-play-state:paused!important}
+#view-qwen:not(.solo) .qw-backbar{display:none}#view-qwen.solo .qw-kind{display:none}
+#view-imgedit .pr-grid{margin-top:14px}
 .mdl-pick{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;margin:0 0 14px;padding:9px 14px;border:1px solid var(--line);border-radius:12px;font-size:13px}
 .mdl-pick.own{border-color:#e08a1e;background:rgba(224,138,30,.10);box-shadow:inset 4px 0 0 #e08a1e}
 .mdl-pick .mp-cur{font-weight:800;font-size:14px;word-break:break-all}
@@ -353,6 +364,21 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 .ip-tools{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
 .ip-tools .seg{flex:0 0 auto}
 .ip-tools input[type=range]{width:140px}
+.ip-act{display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.ip-mini{display:block;max-width:100%;border-radius:10px;border:1px solid var(--line);margin-top:10px}
+/* full-screen mask editor (Inpaint) */
+.ipx{position:fixed;inset:0;z-index:90;background:var(--bg);display:flex;flex-direction:column}
+.ipx[hidden]{display:none}
+.ipx-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;background:var(--bg-2);border-bottom:1px solid var(--line)}
+.ipx-bar input[type=range]{width:160px}
+.ipx-bar .seg{width:auto}
+.ipx-sp{flex:1}
+.ipx-z{min-width:48px;text-align:center}
+.ipx-view{position:relative;flex:1;overflow:hidden;touch-action:none;cursor:none;user-select:none;background:repeating-conic-gradient(var(--bg-2) 0 25%,var(--surface-2) 0 50%) 0 0/22px 22px}
+.ipx-world{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 0 0 1px var(--line-2),0 8px 40px rgba(0,0,0,.5)}
+.ipx-c{position:absolute;left:0;top:0;display:block}
+.ipx-ring{position:absolute;border:2px solid #fff;box-shadow:0 0 0 1px #000;border-radius:50%;pointer-events:none}
+.ipx-help{padding:6px 14px;font-size:12px;color:var(--muted);background:var(--bg-2);border-top:1px solid var(--line)}
 .tokens{display:flex;gap:6px;flex-wrap:wrap}
 .token{font-family:var(--mono);font-size:11.5px;padding:4px 8px;border-radius:7px;background:var(--surface-2);border:1px solid var(--line-2);color:var(--text)}
 .token:hover{border-color:var(--accent)}
@@ -369,14 +395,18 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft
 .chip .ar{border:1.6px solid currentColor;border-radius:3px;opacity:.8}
 .chip.on .ar{color:var(--accent);opacity:1}
 .chip small{color:var(--muted);font-weight:500;font-size:11.5px}
-.agbig{border-radius:14px;padding:16px 18px;margin:4px 0 12px;border:2px solid var(--line-2)}
-.agbig .t{font-size:26px;font-weight:800;line-height:1.1}
-.agbig .n{font-size:15px;margin-top:6px;word-break:break-all}
+.agbig{border-radius:10px;padding:8px 12px;margin:2px 0 8px;border:1.5px solid var(--line-2)}
+.agbig .t{font-size:14px;font-weight:800;line-height:1.2}
+.agbig .n{font-size:12px;margin-top:3px;word-break:break-all;color:var(--muted)}
 .agbig.ok{border-color:#3fd18b;background:rgba(63,209,139,.12)} .agbig.ok .t{color:#3fd18b}
 .agbig.bad{border-color:#ff6b6b;background:rgba(255,107,107,.10)} .agbig.bad .t{color:#ff6b6b}
 .agbig.wait{border-color:#e6a45c;background:rgba(230,164,92,.12)} .agbig.wait .t{color:#e6a45c}
-.agvar{margin:0 0 10px;border:1.5px solid var(--line-2);border-radius:12px;padding:0 12px}
-.agvar>summary{cursor:pointer;font-size:16px;font-weight:700;padding:12px 0;list-style:none}
+.agvar{margin:0 0 6px;border:1px solid var(--line-2);border-radius:10px;padding:0 10px}
+.agvar>summary{cursor:pointer;font-size:13px;font-weight:600;padding:7px 0;list-style:none}
+#agThink button{padding:6px 8px;font-size:12.5px}
+#agThink small{display:none}
+#agThinkHint{font-size:11.5px}
+.ag-pick-hint{color:var(--accent,#c0405a);font-weight:600;margin:-4px 0 8px}
 .agvar>summary::before{content:'▸ ';color:var(--accent,#c0405a)} .agvar[open]>summary::before{content:'▾ '}
 .agvar[open]{padding-bottom:12px}
 .agv .rd{grid-column:1/-1;font-size:14px;font-weight:700}
@@ -560,7 +590,8 @@ body.first-run .pr-first{display:flex}
 .pr-steps .st.ok i{border-color:var(--accent,#c0405a);color:var(--accent,#c0405a)}
 .pr-steps u{width:46px;height:1.5px;background:var(--line-2)}
 .pr-head{text-align:center;margin-bottom:26px}.pr-head h1{margin:0 0 6px;font-size:26px}.pr-head p{margin:0;color:var(--mut,#9a8d93);font-size:14px}
-.pr-types{display:grid;grid-template-columns:repeat(3,minmax(200px,300px));gap:22px;justify-content:center;margin:0 auto}
+.pr-types{display:grid;grid-template-columns:repeat(4,minmax(170px,260px));gap:20px;justify-content:center;margin:0 auto}
+@media (max-width:1150px){.pr-types{grid-template-columns:repeat(2,minmax(170px,260px))}}
 .pr-type{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:38px 26px 34px;border-radius:20px;background:var(--bg-2);border:1.5px solid var(--line);cursor:pointer;transition:.18s;color:inherit}
 .pr-type:hover{border-color:var(--accent,#c0405a);transform:translateY(-3px);box-shadow:0 14px 34px rgba(0,0,0,.3)}
 .pr-type .ic{width:68px;height:68px;display:grid;place-items:center;border-radius:18px;background:rgba(255,255,255,.05);border:1px solid var(--line-2);color:var(--accent,#c0405a);margin-bottom:4px}
@@ -646,7 +677,7 @@ img.pr-media{object-position:center 38%}
 .ag-h div{flex:1;min-width:0}
 .ag-h b{display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ag-h small{font-size:10.5px;color:var(--dim)}
-.ag-h button{width:22px;height:22px;border-radius:7px;font-size:11px;opacity:0;flex:none}
+.ag-h button{width:22px;height:22px;border-radius:7px;font-size:11px;opacity:.45;flex:none}
 .ag-h:hover button{opacity:1;background:var(--surface)}
 .ag-h button:hover{background:var(--accent)!important}
 .ag-hempty{font-size:12px;color:var(--dim);text-align:center;padding:20px 6px}
@@ -679,14 +710,20 @@ img.pr-media{object-position:center 38%}
 .ag-att b{position:absolute;left:4px;top:4px;font-size:10px;font-family:var(--mono);background:rgba(var(--ov-rgb),.8);padding:1px 5px;border-radius:5px}
 .ag-att button{position:absolute;right:-6px;top:-6px;width:20px;height:20px;border-radius:50%;background:var(--surface-2);font-size:11px}
 .ag-comp{padding:12px 18px 14px}
+.ag-dt{--c:var(--accent,#c0405a);border:1.5px solid var(--c);border-radius:12px;background:var(--bg-2);margin-bottom:8px;padding:0 6px 6px}
+.ag-dt>summary{cursor:pointer;padding:10px 8px;font-weight:800;font-size:15px;color:var(--c);list-style:none;display:flex;justify-content:space-between;align-items:center}
+.ag-dt>summary::-webkit-details-marker{display:none}
+.ag-dt>summary::after{content:"▾";color:var(--muted);transition:transform .15s}
+.ag-dt:not([open])>summary::after{transform:rotate(-90deg)}
+.ag-dt:has(button.on){box-shadow:0 0 0 1px var(--c) inset}
 .ag-box{position:relative;border:1px solid var(--line);border-radius:16px;background:var(--bg-2);transition:border-color .15s}
 .ag-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
-.ag-box textarea{border:none;background:transparent;box-shadow:none;resize:none;min-height:64px;max-height:220px;padding:14px 46px 46px 46px;line-height:1.55}
+.ag-box textarea{border:none;background:transparent;box-shadow:none;resize:vertical;min-height:104px;max-height:480px;padding:14px 46px 52px 46px;line-height:1.55;display:block;width:100%}
 .ag-box textarea:focus{box-shadow:none}
-.ag-box .ag-x{position:absolute;top:8px;right:8px;width:26px;height:26px;border-radius:8px;display:grid;place-items:center;color:var(--muted);border:1px solid var(--line);background:var(--surface)}
+.ag-box .ag-x{position:absolute;top:8px;right:20px;width:26px;height:26px;border-radius:8px;display:grid;place-items:center;color:var(--muted);border:1px solid var(--line);background:var(--surface)}
 .ag-box .ag-x:hover{color:var(--accent);border-color:var(--accent)}
 .ag-box .ag-x[hidden],.ag-menu[hidden]{display:none}
-.ag-box .ag-go{position:absolute;right:9px;bottom:9px;width:34px;height:34px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center}
+.ag-box .ag-go{position:absolute;right:28px;bottom:9px;width:34px;height:34px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center}
 .ag-box .ag-go:hover{filter:brightness(1.12)}
 .ag-box .ag-go:disabled{opacity:.5}
 .ag-box .ag-plus{position:absolute;left:9px;bottom:9px;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:var(--muted);border:1px dashed var(--line);background:var(--surface)}
@@ -696,6 +733,12 @@ img.pr-media{object-position:center 38%}
 .ag-menu .ag-clip:hover{background:var(--surface-2)}
 .ag-menu .ag-clip svg{width:16px;height:16px;flex:none;color:var(--muted)}
 .ag-menu .ag-clip.rec{background:rgba(var(--accent-rgb),.25);color:#fff;animation:pulse 1s infinite}
+.ag-box .ag-plus.rec{background:rgba(var(--accent-rgb),.25);color:#fff;border-style:solid;animation:pulse 1s infinite}
+.ag-menu.ag-tools{position:static;display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-width:0;padding:8px 2px 0;background:none;border:none;box-shadow:none;border-radius:0}
+.ag-tools .ag-clip{width:34px;height:34px;padding:0;justify-content:center;border:1px solid var(--line);background:var(--surface);border-radius:10px}
+.ag-tools .ag-clip span{display:none}
+.ag-tools .ag-clip:hover{border-color:var(--accent);background:var(--surface)}
+.ag-tools .ag-clip[hidden]{display:none}
 .ag-audio{margin:0 18px;padding:10px 12px;border-radius:12px;background:var(--bg-2);border:1px solid var(--line);display:grid;gap:6px}
 .ag-audio-h{display:flex;align-items:center;gap:10px}
 .ag-audio-h b{flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -918,7 +961,11 @@ img.pr-media{object-position:center 38%}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>
       Отчёт для разработчика
     </button>
-    <button class="sup-btn" id="supBtn" type="button" title="Программа бесплатная. Если она вам помогла, можно поддержать автора: откроется страница оплаты в браузере. Ничего вводить в самой программе не нужно.">♥ Поддержать проект</button>
+    <button class="rep-btn" id="restartBtn" type="button" title="Закрыть программу и сразу открыть снова — как будто вы вышли и зашли. Помогает, если что-то зависло или не подхватило новый файл (например, LoRA).">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+      Перезапустить программу
+    </button>
+    <button class="sup-btn" id="supBtn" type="button" title="Программа бесплатная. Если она вам помогла, можно поддержать автора: откроется страница оплаты в браузере. Ничего вводить в самой программе не нужно."><span class="heart">♥</span>Поддержать проект</button>
     <div class="zoom-btns" id="uiZoom" title="Размер интерфейса (или Ctrl + колесо мыши)" style="margin:0 0 8px 4px"><button class="btn" id="uiSm" type="button">А−</button><small id="uiPct">100%</small><button class="btn" id="uiLg" type="button">А+</button></div>
     <div class="themes" id="themes" title="Тема оформления">
       <button data-t="" style="background:#e8264f" title="Бордо"></button>
@@ -1184,6 +1231,7 @@ img.pr-media{object-position:center 38%}
     <section class="view" id="view-long"></section>
     <section class="view" id="view-montage"></section>
     <section class="view" id="view-krea"></section>
+    <section class="view" id="view-imgedit"></section>
     <section class="view" id="view-qwen"></section>
     <section class="view" id="view-inpaint"></section>
 
@@ -1200,7 +1248,7 @@ img.pr-media{object-position:center 38%}
         <div class="card ag-hist">
           <button class="btn pri" id="agNew2" style="width:100%">＋ Новый чат</button>
           <div class="ag-hlist" id="agHist"></div>
-          <button class="btn" id="agClear" style="width:100%">Очистить историю</button>
+          <button class="btn" id="agClear" style="width:100%" title="Удалить сразу все чаты (переписки) с агентом. Один чат удаляется крестиком справа от него">Удалить все чаты</button>
         </div>
         <div class="card ag-chat">
           <div class="ag-msgs" id="agMsgs">
@@ -1222,10 +1270,11 @@ img.pr-media{object-position:center 38%}
               <textarea id="agIn" rows="2" placeholder="Опишите сцену, сценарий или вставьте реплики… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
               <button type="button" class="ag-x" id="agClrField" title="Очистить поле и вложения" hidden>✕</button>
               <button type="button" class="ag-go" id="agSend" title="Отправить (Enter)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
-              <button type="button" class="ag-plus" id="agPlus" title="Вложения: изображения, видео, аудио, Библиотека, голосовой ввод">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 12-8.5 8.5a5 5 0 0 1-7-7L14 5a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 8"/></svg>
+              <button type="button" class="ag-plus" id="agMic" title="Голосовой ввод: нажмите, говорите, нажмите ещё раз">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
               </button>
-              <div class="ag-menu" id="agMenu" hidden>
+            </div>
+            <div class="ag-menu ag-tools" id="agMenu"><span class="hint">Приложить:</span>
                 <label class="ag-clip" title="Приложить изображения с компьютера"><input type="file" accept="image/*" multiple hidden id="agFile">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.6"/><path d="m21 15-5-5L5 21"/></svg><span>Изображения с компьютера</span></label>
                 <button class="ag-clip" type="button" id="agLib" title="Взять изображение или звук из Библиотеки (то, что вы уже сделали)">
@@ -1236,10 +1285,7 @@ img.pr-media{object-position:center 38%}
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span>Аудио — распознаем слова</span></label>
                 <button class="ag-clip" type="button" id="agFromLip" title="Взять выделенный фрагмент из раздела Lipsync" hidden>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h2M7 8v8M11 4v16M15 8v8M19 10v4M21 12h0"/></svg><span>Фрагмент из Lipsync</span></button>
-                <button class="ag-clip" type="button" id="agMic" title="Голосовой ввод: нажмите, говорите, нажмите ещё раз">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>Голосовой ввод</span></button>
               </div>
-            </div>
           </div>
         </div>
         <div class="col">
@@ -1278,9 +1324,10 @@ img.pr-media{object-position:center 38%}
           <div class="card">
             <div class="card-h"><h3>Ответ агента</h3></div>
             <div class="seg" id="agThink" style="grid-template-columns:1fr 1fr;margin-bottom:6px"><button type="button" data-k="fast">Быстро<small>без долгих рассуждений</small></button><button type="button" data-k="deep">Думать глубже<small>дольше, для сложных историй</small></button></div>
-            <div class="hint" id="agThinkHint" style="margin-bottom:14px"></div>
-            <div class="card-h"><h3>Промпт для</h3></div>
-            <div class="hint" style="margin-bottom:6px">Видео</div>
+            <div class="hint" id="agThinkHint" style="margin-bottom:10px"></div>
+            <div class="card-h"><h3>Какой промпт нужен?</h3></div>
+            <div class="hint ag-pick-hint">Выберите, для какого раздела агент напишет промпт</div>
+            <details class="ag-dt c-vid"><summary>Видео</summary>
             <div class="seg" id="agTarget" style="grid-template-columns:1fr 1fr;grid-auto-rows:auto">
               <button data-t="video" class="on">Image-to-Video<small>текст / кадры</small></button>
               <button data-t="lipsync">Lipsync<small>референсы + аудио</small></button>
@@ -1289,17 +1336,24 @@ img.pr-media{object-position:center 38%}
               <button data-t="swap">Замена персонажа<small>видео + изображение героя</small></button>
               <button data-t="action">Экшн-сцены<small>бой, погоня, бег</small></button>
               <button data-t="long">Видеостудия<small>клип или ролик по сценам</small></button>
-            </div>
-            <div class="hint" style="margin:12px 0 6px">Изображения</div>
-            <div class="seg" id="agTarget2" style="grid-template-columns:1fr 1fr;grid-auto-rows:auto">
-              <button data-t="plist">Список кадров<small>серия изображений</small></button>
-              <button data-t="krea">Изображение по тексту<small>Krea 2</small></button>
-              <button data-t="fluxt">Изображение по тексту<small>FLUX.2 klein</small></button>
-              <button data-t="qwent">Изображение по тексту<small>Qwen 2.1</small></button>
-              <button data-t="qwen">Правка изображения<small>Qwen, нужно изображение</small></button>
-              <button data-t="story">Раскадровка<small>история в кадрах на одном изображении</small></button>
-              <button data-t="sheet">Лист персонажа<small>4 панели, Krea 2</small></button>
-              <button data-t="sheet6">Лист персонажа ×6<small>6 панелей, Krea 2</small></button>
+            </div></details>
+            <div id="agTarget2" class="ag-grp">
+              <details class="ag-dt c-img"><summary>Изображение по тексту</summary>
+                <div class="seg" style="grid-template-columns:1fr 1fr;grid-auto-rows:auto">
+                  <button data-t="krea">Krea 2<small>по описанию</small></button>
+                  <button data-t="fluxt">FLUX.2 klein<small>можно в коммерцию</small></button>
+                  <button data-t="qwent">Qwen 2.1<small>по описанию</small></button>
+                  <button data-t="plist">Список кадров<small>серия изображений</small></button>
+                </div></details>
+              <details class="ag-dt c-edit"><summary>Редактирование</summary>
+                <div class="seg" style="grid-template-columns:1fr 1fr;grid-auto-rows:auto">
+                  <button data-t="qwen">Править по описанию<small>Qwen, нужно изображение</small></button>
+                  <button data-t="inpaint">Инпейнт<small>переделать закрашенное место</small></button>
+                  <button data-t="outpaint">Расширение (Outpaint)<small>достроить до нового формата</small></button>
+                  <button data-t="story">Раскадровка<small>история в кадрах на одном изображении</small></button>
+                  <button data-t="sheet">Лист персонажа<small>4 панели, Krea 2</small></button>
+                  <button data-t="sheet6">Лист персонажа ×6<small>6 панелей, Krea 2</small></button>
+                </div></details>
             </div>
             <div class="seg" id="agStoryF" hidden style="grid-template-columns:1fr 1fr;margin-top:10px">
               <button data-f="1">По кадрам<small>кадры отдельно + лист</small></button><button data-f="0">Одним листом<small>одно изображение сразу</small></button>
@@ -1704,14 +1758,16 @@ function setEngine(on) {
 /* pinned top bar with every video and image section */
 (function () {
   const bar = document.createElement('div'); bar.id = 'modeBar'; document.body.appendChild(bar);
-  const SHORT = { video: 'Видео', lipsync: 'Lipsync', refs: 'Референсы', actor: 'Актёр', swap: 'Замена', long: 'Видеостудия', action: 'Экшн', krea: 'Изображение', qwen: 'Редактирование', inpaint: 'Инпейнт', upfile: 'Увеличить' };
-  const GROUPS = [['presets'], ['video', 'lipsync', 'refs', 'actor', 'swap', 'long', 'action'], ['krea', 'qwen', 'inpaint'], ['upfile']];
+  const SHORT = { video: 'Видео', lipsync: 'Lipsync', refs: 'Референсы', actor: 'Актёр', swap: 'Замена', long: 'Видеостудия', action: 'Экшн', krea: 'Изображение по тексту', imgedit: 'Редактирование', upfile: 'Увеличить' };
+  // editing of images is ONE page of cards (edit by description, inpaint, remove background, outpaint, character sheet, storyboard)
+  const GROUPS = [['presets'], ['video', 'lipsync', 'refs', 'actor', 'swap', 'long', 'action'], ['krea', 'imgedit'], ['upfile']];
   function paint() {
-    const cur = ($('.view.active')?.id || '').replace('view-', '');
+    let cur = ($('.view.active')?.id || '').replace('view-', '');
+    if (cur === 'qwen' || cur === 'inpaint') cur = 'imgedit';
     let html = '';
     GROUPS.forEach(g => {
       const part = g.map(v => {
-        const n = $(`.nav[data-view="${v}"]`); if (!n || n.hidden) return '';
+        const n = $(`.nav[data-view="${v === 'imgedit' ? 'qwen' : v}"]`); if (!n || n.hidden) return '';
         return `<button type="button" class="mb${v === cur ? ' on' : ''}" data-go="${v}" title="${n.textContent.trim().replace(/["<>&]/g, '')}">${n.querySelector('svg')?.outerHTML || ''}${v === 'presets' ? 'Главная' : SHORT[v]}</button>`;
       }).join('');
       if (part) html += (html ? '<i class="mb-sep"></i>' : '') + part;
@@ -1772,6 +1828,7 @@ async function loadStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
     $('#setCustomBox').hidden = s.engine !== 'external';
+    document.body.classList.toggle('beginner', s.engine === 'managed');
     setEngine(s.online);
     if (!s.online) return;
     askSavedQueue();
@@ -2405,6 +2462,19 @@ function wireSlotSwap(zones, onSwap) {
   });
 }
 const clearSlots = zones => zones.forEach(z => { const x = $('.x', z); if (x) x.click(); });
+/* work in progress of the editing pages survives closing the program (also a crash or a power cut): the pictures and
+   the paint are kept in the browser storage of the window (IndexedDB) until the user presses «Очистить процесс» */
+const WIP = (() => {
+  const open = () => new Promise((res, rej) => { try { const r = indexedDB.open('h3-wip', 1); r.onupgradeneeded = () => r.result.createObjectStore('s'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); } catch (e) { rej(e); } });
+  const run = async (mode, fn) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction('s', mode); const rq = fn(t.objectStore('s')); t.oncomplete = () => { db.close(); res(rq && rq.result); }; t.onerror = t.onabort = () => { db.close(); rej(t.error); }; }); };
+  const timers = {};
+  return {
+    get: k => run('readonly', s => s.get(k)).catch(() => null),
+    del: k => { clearTimeout(timers[k]); return run('readwrite', s => s.delete(k)).catch(() => {}); },
+    save: (k, build, wait = 500) => { clearTimeout(timers[k]); timers[k] = setTimeout(async () => { try { const v = await build(); await run('readwrite', s => s.put(v, k)); } catch { /* storage may be unavailable: the page works without it */ } }, wait); },
+  };
+})();
+const fileInto = (zone, file) => { const inp = $('input[type=file]', zone); if (!inp || !file) return; const dt = new DataTransfer(); dt.items.add(file); inp.files = dt.files; inp.dispatchEvent(new Event('change')); };
 
 /* ---------- VIDEO view ---------- */
 const V = { aspect: '16:9', q: '720p', dur: 5, first: false, last: false, len: () => V.dur };
@@ -2830,8 +2900,20 @@ function showSetupPane(which) {
   $('#setupSteps').hidden = which === 'status';
 }
 
+let setupSeeded = false;
 async function openSetup() {
   showSetupPane('choose'); setStep(1);
+  if (!setupSeeded) {   // the wizard opens with what is already set up (mode, sections), not with the defaults
+    setupSeeded = true;
+    try {
+      const st = await (await fetch('/api/status')).json();
+      if (st.engine) {   // also after an older version left it «not configured»: the saved mode and sections are still known
+        setupOpt = st.engine === 'external' ? 'external' : st.engine === 'cloud' ? 'cloud' : 'new';
+        const saved = (st.saved_modes || st.modes || []).filter(m => MODE_ORDER.includes(m));
+        if (saved.length) setupModes = saved.sort((a, b) => MODE_ORDER.indexOf(a) - MODE_ORDER.indexOf(b));
+      }
+    } catch { /* the defaults stay */ }
+  }
   const qs = new URLSearchParams({ modes: setupModes.join(',') });
   if ($('#instDir').value) qs.set('install_dir', $('#instDir').value);
   if (setupProfile) qs.set('profile', setupProfile);
@@ -3188,7 +3270,7 @@ async function mountCloud(host, wizard) {
   };
 }
 $('#mdReset').onclick = async () => {
-  try { await postJSON('/api/setup/reset'); setNavLocked(true); openSetup(); } catch (e) { toast(e.message); }
+  try { await postJSON('/api/setup/reset'); openSetup(); } catch (e) { toast(e.message); }   // the settings stay saved: nothing is locked or reset
 };
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-websearch]'); if (!b) return;
@@ -3256,7 +3338,7 @@ $('#mdNodes').addEventListener('click', e => {
 function firstRun(on) { document.body.classList.toggle('first-run', !!on); }
 let SET_LOCK = false;
 function setNavLocked(lock) {
-  SET_LOCK = lock; firstRun(lock || !localStorage.getItem('h3-seen-settings'));
+  SET_LOCK = lock; firstRun(lock);   // «Начните здесь» only while nothing is set up yet
   $$('.nav[data-view]').forEach(n => { if (n.dataset.view !== 'models') n.disabled = lock; });
 }
 $('.nav[data-view="models"]').addEventListener('click', async () => {
@@ -3285,6 +3367,12 @@ const TOASTS = [];
 const noteMsg = s => { TOASTS.push(new Date().toLocaleTimeString('ru') + ' ' + String(s).slice(0, 300)); if (TOASTS.length > 20) TOASTS.shift(); };
 window.addEventListener('error', e => noteMsg('Ошибка скрипта: ' + e.message + ' (' + (e.filename || '').split('/').pop() + ':' + e.lineno + ')'));
 window.addEventListener('unhandledrejection', e => noteMsg('Ошибка: ' + (e.reason && e.reason.message || e.reason)));
+$('#restartBtn').onclick = async () => {
+  if (!window.pywebview?.api?.restart_app) { toast('Перезапуск работает только в окне программы. Закройте и откройте её вручную.'); return; }
+  if (!confirm('Программа закроется и сразу откроется снова.\nЗадания, которые сейчас выполняются, будут остановлены. Продолжить?')) return;
+  const r = await window.pywebview.api.restart_app();
+  if (r && r.ok) toast('Перезапускаем…'); else toast('Не получилось перезапустить: ' + ((r && r.error) || 'неизвестная ошибка') + '. Закройте и откройте программу вручную.');
+};
 $('#supBtn').onclick = () => fetch('/api/support', { method: 'POST' }).then(() => toast('Открываю страницу поддержки в браузере'), () => {});
 $('#repBtn').onclick = async () => {
   const b = $('#repBtn'); b.disabled = true;
@@ -4436,7 +4524,7 @@ function makeRefMode(cfg) {
         }
         if (cfg.scenes && root._mode !== 'parts') { fd.append('run', root._run); if (root._q === 'draft') fd.append('draft', '1'); if ($('.lm-acc .on', root)?.dataset.x === 'old') fd.append('accel', 'old'); }
         if (cfg.scenes) { fd.append('scenes', JSON.stringify(sceneList())); $$('.sc', root).forEach((c, i) => c._files.forEach((f, j) => fd.append(`simg${i}_${j}`, f))); fd.append('start', $('.lm-start', root).value || '0'); fd.append('vocals', root._snd === 'own' && $('.lm-vocals', root).checked ? '1' : '0'); }
-        else loraForm(S, fd);
+        else { loraForm(S, fd); if (cfg.mode === 'action') fd.append('preview', S.preview === false ? '0' : '1'); }
         seedForm(S, fd);
         $$('.ref', imgsEl).filter(r => r._file).forEach((r, i) => fd.append('img' + i, r._file));
         if (vidsEl) files('.rm-vids .slot').forEach((s, i) => fd.append('vid' + i, s._file));
@@ -4543,7 +4631,11 @@ function makeRefMode(cfg) {
           + row(a.refiner, 'H3 Sigma Refiner (+1 финальный шаг)')
           + row(a.upscaler, 'апскейлер h3_upscaler_lms')
           + row(!!a.dmad, 'LoRA DMAD') + row(!!a.speed, 'LoRA Speed Slider')
+          + (a.dmad ? '' : '<span class="hint" style="display:block;margin:6px 0">Без LoRA DMAD картинка в экшне менее чистая (может быть «песок»). Скачайте на Civitai («Minimax H3 Turbo LoRAs», вкладка dmad_larryvrhv4_merge, файл minimax_h3_dmad_full_dareties_v4_step600_comfy.safetensors, около 3,9 ГБ) и положите в папку loras\\MinimaxH3 вашего ComfyUI. Размер: для чистой картинки выбирайте «HD+» (1 МП) и выше, а ускорять лучше короткой длиной, а не меньшим размером.</span>')
           + (a.faithful ? '' : '<span class="hint">Чего нет — заменяется ближайшим: обычный двухпроходный сэмплинг с тем же графиком 8 + 4. Установите недостающее в ComfyUI, и приложение само переключится на точную копию.</span>');
+        box.innerHTML += `<label class="hint" style="display:flex;gap:8px;align-items:center;margin-top:8px;cursor:pointer" title="Во время расчёта в окне справа идёт анимация: видно, получается ли нужное движение. Расчёт при этом чуть медленнее. Нужны узлы KJNodes (ставятся сами) и файл taeh3.">
+          <input type="checkbox" class="act-prev" ${S.preview === false ? '' : 'checked'}> Показывать движение во время расчёта (немного медленнее)</label>`;
+        $('.act-prev', box).onchange = e => { S.preview = e.target.checked; };
       } catch { box.innerHTML = '<span class="hint">ComfyUI не отвечает</span>'; }
     };
     $(`.nav[data-view="action"]`).addEventListener('click', check);
@@ -4577,7 +4669,7 @@ const RM = {
     placeholder: '',
   }),
   action: makeRefMode({
-    mode: 'action', title: 'Экшн-сцены', pill: 'Hybrid · 8 + 4 шага', dur: 8, maxImages: 6, videos: false,
+    mode: 'action', title: 'Экшн-сцены', pill: 'Hybrid · 8 + 4 шага', dur: 5, maxImages: 6, videos: false,
     sub: 'Бой, погоня, бег, стрельба — динамичные сцены с вашими персонажами',
     refHint: 'До 6 изображений: персонажи и локация. До 3 аудио: голос, ритм или атмосфера (вместе с изображениями). В промпте: &lt;Picture 1&gt; или роли вида «@image1 - character reference».',
     placeholder: '@image1 - character reference. Девушка с @image1 убегает по ночному рынку, опрокидывает корзины…',
@@ -4602,8 +4694,8 @@ const PRESETS = [
     text: 'Ролик из нескольких сцен, каждая продолжает прошлую: клипы, истории, музыка.' },
   { id: 'krea', kind: 'image', title: 'Изображение по тексту', need: 'только текст',
     text: 'Красивые изображения по описанию: обычные, реализм, серии по списку промптов.' },
-  { id: 'qwen', kind: 'image', title: 'Правка изображения', need: 'изображение + что изменить',
-    text: 'Меняете одежду, фон, детали; делаете карту персонажа и раскадровку.' },
+  { id: 'qwen', kind: 'image', title: 'Редактирование изображений', need: 'изображение + что изменить',
+    text: 'Правка по описанию, инпейнт, убрать фон, расширение, лист персонажа и раскадровка.' },
 ];
 const PR = { tab: '', have: {}, q: '', f: 'all', view: 'grid' };
 try { PR.favs = JSON.parse(localStorage.getItem('h3-pfav') || '[]'); } catch { PR.favs = []; }
@@ -4684,7 +4776,8 @@ $('#view-presets').innerHTML = `<div class="pr-steps" id="prSteps"><span class="
   <div class="pr-first"><div class="n">1</div><div><b>Сначала откройте «Настройки»</b><span>Там выбирается, как работает программа: «Я новичок» (всё скачается само) или «У меня уже есть ComfyUI и модели». Без этого генерация не начнётся.</span></div><button class="btn primary" id="prGoSet" type="button">Открыть Настройки</button></div>
   <div class="pr-head"><h1 id="prTitle"></h1><p id="prSub"></p></div>
   <div class="pr-types" id="prTypes">
-    <button class="pr-type" type="button" data-t="image"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.7"/><path d="m21 16-5-5L6 20"/></svg></span><b>Изображение</b><p>Создать по описанию, изменить готовое, карта героя, раскадровка</p></button>
+    <button class="pr-type" type="button" data-t="image"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.7"/><path d="m21 16-5-5L6 20"/></svg></span><b>Изображение</b><p>Создать по описанию, карта героя, раскадровка, список кадров</p></button>
+    <button class="pr-type" type="button" data-go="imgedit"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></span><b>Редактирование изображений</b><p>Править по описанию, инпейнт, убрать фон, расширить картинку</p></button>
     <button class="pr-type" type="button" data-t="video"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="13" height="14" rx="2.5"/><path d="m16 10 5-3v10l-5-3"/><path d="m8.5 10.5 3 1.5-3 1.5z" fill="currentColor"/></svg></span><b>Видео</b><p>Оживить изображение, озвучить, сменить героя, снять сцены</p></button>
     <button class="pr-type" type="button" data-go="upfile"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7"/></svg></span><b>Увеличить</b><p>Сделать видео или фото чётче и крупнее</p></button>
     <button class="pr-rent" type="button" id="prRent"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span><span><b>Нет мощной видеокарты? Арендуйте мощный компьютер</b><small>Платите только за время работы, ничего не нужно покупать. Подробно и по шагам</small></span><i>Как это работает →</i></button>
@@ -4704,7 +4797,7 @@ $('#prView').onclick = e => { const b = e.target.closest('button'); if (b) { PR.
 $('#view-presets .pr-grid').onclick = e => {
   const f = e.target.closest('[data-fav]');
   if (f) { const id = f.dataset.fav; PR.favs = PR.favs.includes(id) ? PR.favs.filter(x => x !== id) : [...PR.favs, id]; try { localStorage.setItem('h3-pfav', JSON.stringify(PR.favs)); } catch {} presetsPaint(); return; }
-  const c = e.target.closest('.pr-card'); if (c) goTo(c.dataset.p);
+  const c = e.target.closest('.pr-card'); if (c) goTo(c.dataset.p === 'qwen' ? 'imgedit' : c.dataset.p);
 };
 async function presetsHave() {
   try { const st = await (await fetch('/api/status')).json(); (st.models || []).forEach(m => { PR.have[m.role] = !!m.have; }); } catch {}
@@ -4771,8 +4864,8 @@ $('#agFile').onchange = async e => {
 };
 $('#agEmpty').onclick = e => { const s = e.target.closest('span'); if (s) { $('#agIn').value = s.textContent.replace(/[«»]/g, '').replace(/ \+ фото героинь$/, ''); $('#agIn').focus(); } };
 $('#agIn').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#agSend').click(); } });
-const AG_NAMES = { plist: 'список кадров', long: 'сцены длинного видео', video: 'Генерацию видео', lipsync: 'Lipsync', refs: 'Референсы', actor: 'Актёрскую игру', swap: 'Замену персонажа', action: 'Экшн-сцены', krea: 'Изображение по тексту', qwen: 'Правку изображения', sheet: 'Изображение по тексту', sheet6: 'Изображение по тексту', fluxt: 'Изображение по тексту', qwent: 'Изображение по тексту', story: 'Изображение по тексту' };
-const AG_IMG = ['plist', 'krea', 'qwen', 'sheet', 'sheet6', 'fluxt', 'qwent', 'story'];
+const AG_NAMES = { plist: 'список кадров', long: 'сцены длинного видео', video: 'Генерацию видео', lipsync: 'Lipsync', refs: 'Референсы', actor: 'Актёрскую игру', swap: 'Замену персонажа', action: 'Экшн-сцены', krea: 'Изображение по тексту', qwen: 'Правку изображения', sheet: 'Изображение по тексту', sheet6: 'Изображение по тексту', fluxt: 'Изображение по тексту', qwent: 'Изображение по тексту', story: 'Изображение по тексту', outpaint: 'Расширение изображения', inpaint: 'Инпейнт' };
+const AG_IMG = ['plist', 'krea', 'qwen', 'sheet', 'sheet6', 'fluxt', 'qwent', 'story', 'outpaint', 'inpaint'];
 AG.storyModel = 'krea'; AG.storyFrames = true;
 AG.think = (() => { try { return localStorage.getItem('h3-ag-think') === 'deep' ? 'deep' : 'fast'; } catch { return 'fast'; } })();
 function agThinkPaint() {
@@ -4797,6 +4890,8 @@ function agCtx() {
   $('#agCtx').textContent = AG_IMG.includes(AG.target)
     ? ({ krea: 'Опишите изображение словами: агент напишет промпт для Krea 2. Изображения в чате — только образцы настроения.',
          qwen: `Приложите изображение, которое нужно изменить (скрепка или «Из Библиотеки»), и напишите, что поменять. Изображений в чате: ${n}.`,
+         outpaint: `Приложите изображение, которое нужно достроить, и скажите, до какого формата и что дорисовать по краям (например, «до квадрата, продолжить комнату»). Агент напишет промпт только для новых краёв. Изображений в чате: ${n}.`,
+         inpaint: `Приложите изображение и опишите, что должно быть на месте, которое вы закрасите (например, «розовая сумка со стразами вместо чёрной»). Агент напишет промпт для закрашенного места. Изображений в чате: ${n}.`,
          story: 'Расскажите историю по кадрам («первый кадр — …, второй кадр — …») и скажите, сколько кадров нужно. Агент напишет промпт одного изображения-раскадровки без подписей и номеров для выбранной модели.',
          fluxt: 'Опишите изображение словами: агент напишет промпт для FLUX.2 klein (без негатива, описание по порядку: главное сначала). Изображения в чате — только образцы настроения.',
          qwent: 'Опишите изображение словами: агент напишет промпт для Qwen 2.1. Негатив впишите отдельным полем в разделе. Изображения в чате — только образцы настроения.',
@@ -4945,6 +5040,10 @@ $('#agMic').onclick = async () => {
   mr.start();
 };
 
+// the round button shows only an arrow (send) or a square (stop), never a word
+const AG_ICO_SEND = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
+const AG_ICO_STOP = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+function agSendIcon(busy) { const b = $('#agSend'); b.innerHTML = busy ? AG_ICO_STOP : AG_ICO_SEND; b.title = busy ? 'Остановить' : 'Отправить (Enter)'; }
 async function agSend() {
   let text = $('#agIn').value.trim();
   if (AG.busy) { AG.ctrl?.abort(); return; }
@@ -4967,7 +5066,7 @@ async function agSend() {
   const reply = { role: 'assistant', content: '', status: 'Отправляем…' };
   AG.msgs.push(reply); renderMsgs();
   const el = $('#agMsgs .msg:last-child');
-  AG.busy = true; $('#agSend').textContent = 'Стоп'; AG.ctrl = new AbortController();
+  AG.busy = true; agSendIcon(true); AG.ctrl = new AbortController();
   const ctx = { model: AG.storyFrames && AG.storyModel === 'krea' ? 'flux' : AG.storyModel, frames: AG.target === 'story' && AG.storyFrames, duration: AG_IMG.includes(AG.target) ? null : AG.target === 'video' ? V.dur : AG.target === 'lipsync' ? (L.dur0 ? L.len() : null) : RM[AG.target].S.dur };
   if (AG.target === 'actor') ctx.voice = RM.actor.voice() ? 1 : 0;
   if (AG.target === 'long') ctx.long = { sound: RM.long.root._snd, secs: $$('.sc input[type=range]', RM.long.root).map(r => +r.value) };
@@ -4993,7 +5092,7 @@ async function agSend() {
       }
     }
   } catch (e) { if (e.name !== 'AbortError') reply.error = e.message; }
-  AG.busy = false; $('#agSend').textContent = 'Отправить'; reply.status = null;
+  AG.busy = false; agSendIcon(false); reply.status = null;
   if (!reply.content && !reply.error) reply.error = 'Остановлено';
   renderAssistant(el, reply); agStatus(); saveChat();
 }
@@ -5001,10 +5100,9 @@ $('#agSend').onclick = agSend;
 /* ChatGPT-style input: paperclip menu, auto-grow, clear-field cross in the corner */
 (() => {
   const box = $('.ag-box'), menu = $('#agMenu'), tin = $('#agIn');
-  $('#agPlus').onclick = e => { e.stopPropagation(); menu.hidden = !menu.hidden; };
-  document.addEventListener('click', e => { if (!menu.hidden && !e.target.closest('.ag-box')) menu.hidden = true; });
-  menu.addEventListener('click', () => { if (!$('#agMic').classList.contains('rec')) menu.hidden = true; });
-  const grow = () => { tin.style.height = 'auto'; tin.style.height = Math.min(220, Math.max(64, tin.scrollHeight + 2)) + 'px'; };
+  // the attach buttons (pictures, Library, video, audio) are a row of small icons under the field; the microphone is in the field
+  const grow = () => { tin.style.height = 'auto'; tin.style.height = Math.min(480, Math.max(104, tin._min || 0, tin.scrollHeight + 2)) + 'px'; };
+  tin.addEventListener('mouseup', () => { tin._min = tin.offsetHeight > 104 ? tin.offsetHeight : 0; });   // keep the height the user dragged the field to
   const updX = () => { $('#agClrField').hidden = !tin.value && !AG.att.length; };
   tin.addEventListener('input', grow); tin.addEventListener('input', updX);
   $('#agClrField').onclick = () => { tin.value = ''; AG.att = []; renderAtt(); grow(); updX(); tin.focus(); };
@@ -5057,8 +5155,8 @@ $('#agHist').addEventListener('click', e => {
   }
   openChat(row.dataset.id);
 });
-$('#agClear').onclick = () => confirmBox('Очистить всю историю?', 'Все переписки с агентом будут удалены.', 'Очистить', async () => {
-  await fetch('/api/agent/chats', { method: 'DELETE' }); newChat(); toast('История очищена');
+$('#agClear').onclick = () => confirmBox('Удалить все чаты?', 'Все переписки с агентом будут удалены без возможности восстановления.', 'Удалить все', async () => {
+  await fetch('/api/agent/chats', { method: 'DELETE' }); newChat(); toast('Все чаты удалены');
 });
 $('#agNew').onclick = newChat;
 $('#agNew2').onclick = newChat;
@@ -5081,7 +5179,13 @@ async function sendPrompt(blk, to) {
     if (!order.includes(n)) order.push(n);
     return m.replace(/\d+/, String(order.indexOf(n) + 1));
   });
-  const files = order.length ? order.map(n => allFiles[n - 1]) : noFrames;
+  // single-picture targets: the picture attached to THE message this prompt answers (not every picture of the chat)
+  const mi = +blk.closest('.msg')?.dataset.i;
+  let own = null;
+  if (!isNaN(mi)) for (let k = Math.min(mi, perMsg.length - 1); k >= 0; k--) {
+    if (AG.msgs[k].role === 'user' && perMsg[k].ims.length) { own = perMsg[k].ims.slice(0, perMsg[k].ims.length - perMsg[k].frames); break; }
+  }
+  const files = order.length ? order.map(n => allFiles[n - 1]) : (['outpaint', 'inpaint', 'qwen'].includes(to) && own && own.length ? own : noFrames);
   if (to === 'story' && (AG.storyFrames || (files.length && AG.storyModel !== 'krea'))) {
     IMG.qwen.fill({ prompt, kind: 'story', engine: AG.storyFrames && AG.storyModel === 'krea' ? 'flux' : AG.storyModel, frames: AG.storyFrames });
     for (const [i, sel] of ['#qwDrop', '#qwDrop2', '#qwDrop3'].entries()) {
@@ -5095,12 +5199,16 @@ async function sendPrompt(blk, to) {
     const six = AG.target === 'sheet6' || to === 'sheet6';
     const engine = to === 'fluxt' ? 'flux' : to === 'qwent' ? 'qwen' : (AG.target === 'fluxt' ? 'flux' : AG.target === 'qwent' ? 'qwen' : AG.target === 'story' ? AG.storyModel : 'krea');
     IMG.krea.fill({ prompt, engine, aspect: six ? '21:9' : AG.target === 'sheet' || to === 'sheet' || AG.target === 'story' ? '16:9' : undefined }); to = 'krea';
-  } else if (to === 'qwen') {
-    IMG.qwen.fill({ prompt });
+  } else if (to === 'qwen' || to === 'outpaint') {
+    IMG.qwen.fill(to === 'outpaint' ? { prompt, sub: 'Расширение изображения' } : { prompt });
+    to = 'qwen';
     for (const [i, sel] of ['#qwDrop', '#qwDrop2', '#qwDrop3'].entries()) {
       $(sel + ' .x')?.click();
       if (files[i]) await setDropFile($(sel + ' input'), files[i]);
     }
+  } else if (to === 'inpaint') {
+    const ta = $('#view-inpaint .ip-prompt'); ta.value = prompt; ta.dispatchEvent(new Event('input'));
+    if (files[0]) await setDropFile($('#ipDrop input'), files[0]);
   } else if (to === 'video') {
     $('#vPrompt').value = prompt; $('#vPrompt').oninput({ target: $('#vPrompt') });
     if (files[0]) { $('#dFirst .x')?.click(); await setDropFile($('#dFirst input'), files[0]); }
@@ -5135,8 +5243,9 @@ async function sendPrompt(blk, to) {
   if (to === 'lipsync' && au) await setDropFile($('#aFile'), au);
   const vf = [...AG.msgs].reverse().find(m => m.videoFile)?.videoFile;   // the video shown to the agent goes to the swap form too
   if (to === 'swap' && vf) await setDropFile($('.rm-vids input', RM.swap.root), vf);
-  goTo(to);
-  const name = { video: '«Генерацию видео»', lipsync: 'Lipsync', refs: '«Референсы»', actor: '«Актёрскую игру»', swap: '«Замену персонажа»', action: '«Экшн-сцены»', long: '«Видеостудия»', krea: '«Изображение по тексту»', qwen: '«Правку изображения»' }[to];
+  const solo = to === 'qwen' ? { outpaint: 'outpaint', qwen: 'edit', story: 'story' }[AG.target] : null;
+  if (solo && window.openImgEdit) window.openImgEdit(solo); else goTo(to);   // edit / extend / storyboard open as a single-task page, like the cards
+  const name = { video: '«Генерацию видео»', lipsync: 'Lipsync', refs: '«Референсы»', actor: '«Актёрскую игру»', swap: '«Замену персонажа»', action: '«Экшн-сцены»', long: '«Видеостудия»', krea: '«Изображение по тексту»', qwen: AG.target === 'outpaint' ? '«Расширение изображения»' : '«Правку изображения»', inpaint: '«Инпейнт» (закрасьте место кистью)' }[to];
   toast(`Промпт перенесён в ${name}` + (files.length && to !== 'video' && to !== 'krea' ? ' вместе с изображениями' : '') + (to === 'lipsync' ? (au ? ' и аудио — выделите нужный фрагмент' : ' — добавьте аудио') : ''));
 }
 // the finished prompt can be edited in place; the edit is kept when the chat is redrawn
@@ -5187,7 +5296,6 @@ async function clipText() {
   try { const t = await navigator.clipboard.readText(); if (t) return t; } catch {}
   try { return (await (await fetch('/api/clipboard', { method: 'POST' })).json()).text || ''; } catch { return ''; }
 }
-$('#agClear').onclick = () => { const ta = $('#agIn'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus(); };
 
 // right-click menu: copy / cut / paste / select all in every text field, copy on any selectable text
 (() => {
@@ -6315,10 +6423,11 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
 (() => {
   const root = $('#view-qwen'), S = { kind: 'edit', size: '1', aspect: '', aspectOut: '16:9', headless: true, bg: 'grey', panels: 4, engine: 'qwen', frames: true, line: 'white' };
   root.innerHTML = `
+    <div class="pr-bar qw-backbar"><button class="pr-back" type="button" data-imgedit>← Все варианты редактирования</button></div>
     <div class="head"><div><h1>Редактирование изображений</h1><p>Правьте готовые изображения: изменить по описанию, закрасить место (инпейнт), убрать фон, расширить картинку, собрать лист персонажа</p></div>
       <div class="mode-pill"><i></i><span>Qwen Image 2.1</span></div></div>
     <div class="grid"><div class="col">
-      <div class="card"><div class="card-h"><h3><span class="n">1</span>Изображение</h3><button class="btn mini" id="qwClrAll" type="button" title="Убрать все изображения из ячеек">Очистить всё</button></div>
+      <div class="card"><div class="card-h"><h3><span class="n">1</span>Изображение</h3><button class="btn mini" id="qwClrAll" type="button" title="Убрать изображения и текст. Пока вы не нажмёте, всё сохраняется, даже если программа закроется">Очистить процесс</button></div>
         <div class="qw-slots">
           <label class="drop" id="qwDrop"><input type="file" accept="image/*"><div class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.6"/><path d="m21 15-5-5L5 21"/></svg><b>Ваше изображение</b><span>перетащите или нажмите</span></div><span class="tag" hidden>Исходная</span><button class="x" type="button">✕</button></label>
           <label class="drop qw-s2" id="qwDrop2" title="Ещё одно изображение (референс, по желанию)"><input type="file" accept="image/*"><div class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div><span class="tag" hidden>2</span><button class="x" type="button">✕</button></label>
@@ -6339,6 +6448,11 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
           <textarea class="qw-prompt" placeholder="Что изменить и что оставить. Например: Этот человек сидит в кафе у окна и пьёт кофе. Лицо, причёска и одежда как на изображении."></textarea>
           <div class="ta-foot"><span class="hint">Скажите и что поменять, и что оставить прежним — так результат точнее</span></div>
         </div>
+          <div class="row qw-batch" hidden style="margin-top:12px"><div class="row-l">Серия изображений <span class="hint">необязательно</span></div>
+            <div class="hint" style="margin-bottom:8px">Один и тот же промпт и настройки для многих изображений: например, раскрасить много чёрно-белых фото. Каждое пойдёт в очередь отдельным заданием, результаты появятся в Библиотеке.</div>
+            <label class="btn qw-bpick" style="display:inline-block;cursor:pointer">Выбрать изображения…<input class="qw-bfiles" type="file" accept="image/*" multiple hidden></label>
+            <button class="btn pri qw-bgo" type="button" disabled style="margin-left:8px">Запустить серию</button>
+            <div class="hint qw-bstat" style="margin-top:8px"></div></div>
           <div class="row qw-editonly qw-asprow" style="margin-top:12px"><div class="row-l">Формат кадра <span class="hint qw-asphint">по умолчанию как у вашего изображения</span></div><div class="chips qw-asp"></div></div>
           <div class="qw-szwrap" style="margin-top:12px">${SZ_ROW}</div>
           <div class="row qw-editonly qw-sizerow" style="margin-top:12px"><div class="row-l">Размер результата</div><div class="seg qw-size" style="grid-template-columns:1fr 1fr"><button data-s="1">Обычный<small>~1 МП, быстро</small></button><button data-s="2">Крупный<small>~2 МП, дольше</small></button></div></div></div>
@@ -6358,7 +6472,15 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
   szWire($('.qw-szwrap', root), S, () => upd(), () => IMG_SIZES[S.aspect] || [1376, 768]);
   wireDrop(drop2, () => {}); wireDrop(drop3, () => {});
   wireSlotSwap([drop, drop2, drop3]);
-  $('#qwClrAll', root).onclick = () => clearSlots([drop, drop2, drop3]);
+  $('#qwClrAll', root).onclick = () => {
+    clearSlots([drop, drop2, drop3]); $('.qw-prompt', root).value = ''; $('.qw-marks', root).value = '';
+    WIP.del('qwen'); toast('Очищено');
+  };
+  /* keep the work: pictures, texts and settings survive a restart (also a crash or a power cut) */
+  const saveQw = () => WIP.save('qwen', () => ({
+    S: { kind: S.kind, size: S.size, aspect: S.aspect, aspectOut: S.aspectOut, headless: S.headless, bg: S.bg, panels: S.panels, engine: S.engine, frames: S.frames, line: S.line },
+    prompt: $('.qw-prompt', root).value, marks: $('.qw-marks', root).value, files: [drop._file || null, drop2._file || null, drop3._file || null] }));
+  ['click', 'input', 'change', 'drop', 'dragend'].forEach(ev => root.addEventListener(ev, e => { if (!e.target.closest('#qwClrAll')) saveQw(); }));
   const P = imgPanel($('.qw-prev', root), {
     mode: 'qwen', url: '/api/generate/qwen',
     promptText: () => S.kind === 'sheet' ? 'Лист персонажа' : S.kind === 'bg' ? 'Убрать фон' : $('.qw-prompt', root).value.trim(),
@@ -6371,7 +6493,7 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
       if (S.kind === 'outpaint') {   // the picture is placed on the larger canvas by the client
         const c = outCanvas();
         fd.append('image', c.file); fd.append('orig', c.orig);
-        fd.append('width', c.w); fd.append('height', c.h); fd.append('x', c.x); fd.append('y', c.y);
+        fd.append('width', c.w); fd.append('height', c.h); fd.append('x', c.x); fd.append('y', c.y); fd.append('ow', c.ow); fd.append('oh', c.oh);
         fd.append('prompt', $('.qw-prompt', root).value.trim());
         imgSeedForm(S, fd); return fd;
       }
@@ -6390,20 +6512,28 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
   const outCanvas = () => {   // the source placed on the larger canvas of the chosen aspect (centered), blurred fill behind it
     const img = $('img', drop), iw = img.naturalWidth, ih = img.naturalHeight;
     const asp = IMG_ASPECTS.find(a => a[0] === S.aspectOut) || IMG_ASPECTS[0];
-    let t = Math.max(iw / asp[2], ih / asp[3]);
-    if (Math.max(asp[2] * t, asp[3] * t) > 2560) t *= 2560 / Math.max(asp[2] * t, asp[3] * t);
-    let w = Math.max(iw, Math.ceil(asp[2] * t / 16) * 16), h = Math.max(ih, Math.ceil(asp[3] * t / 16) * 16);
-    const dw = Math.round(iw * t), dh = Math.round(ih * t);
-    const x = Math.floor((w - dw) / 2 / 16) * 16, y = Math.floor((h - dh) / 2 / 16) * 16;
+    // the smallest canvas of the chosen shape that holds the whole picture at its own size (scale 1)
+    const r = asp[2] / asp[3];
+    let W = Math.max(iw, ih * r), H = W / r;
+    // too large (long side over 2048 or over ~2.6 megapixels): everything is scaled down together; too small: enlarged
+    let s = Math.min(1, 2048 / Math.max(W, H), Math.sqrt(2.0e6 / (W * H)));   // ~2 megapixels at most: the model sees the canvas at its own size
+    if (Math.min(W, H) * s < 384) s = 384 / Math.min(W, H);
+    W *= s; H *= s;
+    const dw = Math.max(1, Math.round(iw * s)), dh = Math.max(1, Math.round(ih * s));
+    // the canvas and the place of the picture sit on a 32-pixel grid, so that what the model draws lines up with the original
+    const w = Math.max(Math.ceil(W / 32) * 32, Math.ceil(dw / 32) * 32), h = Math.max(Math.ceil(H / 32) * 32, Math.ceil(dh / 32) * 32);
+    const x = Math.max(0, Math.floor((w - dw) / 2 / 32) * 32), y = Math.max(0, Math.floor((h - dh) / 2 / 32) * 32);
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const cx = c.getContext('2d');
-    cx.filter = 'blur(24px)'; cx.drawImage(img, x, y, dw, dh);   // soft fill of the new edges
-    cx.filter = 'none'; cx.drawImage(img, x, y, dw, dh);
+    // the new edges are a FLAT GRAY (#808080): this is the fill the outpaint LoRA was trained on («replace the solid gray
+    // areas with a continuation of the scene»). A blurred copy of the picture there made the model leave it as it was.
+    cx.fillStyle = '#808080'; cx.fillRect(0, 0, w, h);
+    cx.drawImage(img, x, y, dw, dh);
     const o = document.createElement('canvas'); o.width = dw; o.height = dh;          // the untouched original at its place
     o.getContext('2d').drawImage(img, 0, 0, dw, dh);
     const png = cv => { const b = atob(cv.toDataURL('image/png').split(',')[1]), a = new Uint8Array(b.length);
       for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return new File([a], 'out.png', { type: 'image/png' }); };
-    return { file: png(c), orig: png(o), w, h, x, y };
+    return { file: png(c), orig: png(o), w, h, x, y, ow: dw, oh: dh };
   };
   const upd = () => {
     const isBg = S.kind === 'bg', isOut = S.kind === 'outpaint';
@@ -6419,6 +6549,7 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
     $$('.qw-fr button', root).forEach(b => b.classList.toggle('on', (b.dataset.fr === '1') === S.frames));
     $$('.qw-ln button', root).forEach(b => b.classList.toggle('on', b.dataset.ln === S.line));
     $('.qw-ptxt', root).hidden = isBg;
+    $('.qw-batch', root).hidden = !(S.kind === 'edit' || isBg);
     $('.qw-eng', root).closest('.row').hidden = isBg || isOut;   // these two run on Qwen 2.1 only
     $('.qw-asprow', root).hidden = S.kind === 'story' || isBg || (S.engine === 'flux' && !isOut);
     $('.qw-asphint', root).textContent = isOut ? 'картинка останется целиком, края дорисуются до этого формата' : 'по умолчанию как у вашего изображения';
@@ -6434,6 +6565,39 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
     if (S.kind === 'sheet') S.panels === 6 ? P.ratio(2112, 960) : P.ratio(1920, 1088);
     else if (S.kind === 'story') P.ratio(1920, 1088);
     if (S.kind !== 'sheet' && S.cw && S.ch) P.ratio(S.cw, S.ch);
+  };
+  /* series: the same prompt and settings for many pictures, one queued job per picture */
+  let batchFiles = [];
+  $('.qw-bfiles', root).onchange = e => {
+    batchFiles = [...e.target.files].filter(f => f.type.startsWith('image/')).slice(0, 60);
+    $('.qw-bgo', root).disabled = !batchFiles.length;
+    $('.qw-bstat', root).textContent = batchFiles.length ? `Выбрано изображений: ${batchFiles.length}` + (e.target.files.length > 60 ? ' (взяты первые 60)' : '') : '';
+  };
+  $('.qw-bgo', root).onclick = async () => {
+    const st = $('.qw-bstat', root), btn = $('.qw-bgo', root), prompt = $('.qw-prompt', root).value.trim();
+    if (!batchFiles.length) return;
+    if (S.kind === 'edit' && !prompt) { st.textContent = 'Напишите, что изменить на изображениях'; return; }
+    btn.disabled = true; let done = 0;
+    for (const f of batchFiles) {
+      const fd = new FormData(); fd.append('kind', S.kind); fd.append('image', f);
+      if (S.kind === 'bg') fd.append('size', S.size);
+      else {
+        fd.append('engine', S.engine);
+        if (S.cw && S.ch) { fd.append('width', S.cw); fd.append('height', S.ch); }
+        if (drop2._file) fd.append('image2', drop2._file); if (drop3._file) fd.append('image3', drop3._file);
+        fd.append('prompt', prompt); fd.append('size', S.size); fd.append('aspect', S.aspect);
+      }
+      imgSeedForm(S, fd);
+      try {
+        const resp = await fetch('/api/generate/qwen', { method: 'POST', body: fd });
+        const txt = await resp.text(); let r; try { r = JSON.parse(txt); } catch { r = { error: txt }; }
+        if (!resp.ok) throw new Error(r.error || resp.statusText);
+        qAdd(r.prompt_id, 'qwen', S.kind === 'bg' ? 'Убрать фон' : prompt); done++;
+        st.textContent = `В очередь поставлено: ${done} из ${batchFiles.length}`;
+      } catch (err) { st.textContent = `Остановились на ${done + 1}-м изображении (${f.name}): ${err.message}. Поставлено: ${done}.`; btn.disabled = false; return; }
+    }
+    st.textContent = `Готово: в очередь поставлено ${done} из ${batchFiles.length}. Ход работы смотрите в разделе «Очередь», результаты придут в Библиотеку.`;
+    batchFiles = []; $('.qw-bfiles', root).value = ''; btn.disabled = true;
   };
   root.addEventListener('click', e => {
     const fr = e.target.closest('.qw-fr button'), ln = e.target.closest('.qw-ln button');
@@ -6460,6 +6624,14 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
     } catch {}
   }
   imgSeedWire(root, S); upd();
+  (async () => {   // restore the unfinished work of the last session
+    const st = await WIP.get('qwen'); if (!st) return;
+    Object.assign(S, st.S || {});
+    if (st.prompt) $('.qw-prompt', root).value = st.prompt;
+    if (st.marks) $('.qw-marks', root).value = st.marks;
+    [drop, drop2, drop3].forEach((z, i) => fileInto(z, (st.files || [])[i]));
+    upd();
+  })();
   IMG.qwen = { fill: it => { if (it.engine) S.engine = it.engine; if (it.frames !== undefined) S.frames = !!it.frames; if (String(it.sub || '').startsWith('Раскадровка по кадрам')) S.frames = true; else if (String(it.sub || '').startsWith('Раскадровка')) S.frames = false; if (it.kind === 'story' || String(it.sub || '').startsWith('Раскадровка')) { S.kind = 'story'; $('.qw-prompt', root).value = it.prompt || ''; } else if (it.sub === 'Лист персонажа') S.kind = 'sheet'; else if (it.sub === 'Убрать фон') S.kind = 'bg'; else if (String(it.sub || '').startsWith('Расширение')) { S.kind = 'outpaint'; $('.qw-prompt', root).value = it.prompt || ''; } else { S.kind = 'edit'; $('.qw-prompt', root).value = it.prompt || ''; } upd(); } };
 })();
 
@@ -6467,19 +6639,16 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
 (() => {
   const root = $('#view-inpaint'), S = { size: '1' };
   root.innerHTML = `
+    <div class="pr-bar"><button class="pr-back" type="button" data-imgedit>← Все варианты редактирования</button></div>
     <div class="head"><div><h1>Инпейнт</h1><p>Закрасьте место на изображении, которое нужно переделать, и опишите, что там должно быть. Всё, что не закрашено, останется без изменений</p></div>
       <div class="mode-pill"><i></i><span>Qwen Image 2.1</span></div></div>
     <div class="grid"><div class="col">
-      <div class="card"><div class="card-h"><h3><span class="n">1</span>Изображение и закраска</h3></div>
+      <div class="card"><div class="card-h"><h3><span class="n">1</span>Изображение и закраска</h3><button class="btn mini ip-clr" type="button" title="Убрать изображение, закраску и текст. Пока вы не нажмёте, всё это сохраняется, даже если программа закроется">Очистить процесс</button></div>
         <label class="drop" id="ipDrop"><input type="file" accept="image/*"><div class="ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.6"/><path d="m21 15-5-5L5 21"/></svg><b>Ваше изображение</b><span>перетащите или нажмите</span></div><span class="tag" hidden>Исходная</span><button class="x" type="button">✕</button></label>
         <div class="ip-edit" hidden>
-          <div class="ip-stage"><canvas class="ip-img"></canvas><canvas class="ip-over"></canvas></div>
-          <div class="ip-tools">
-            <div class="seg ip-mode" style="grid-template-columns:1fr 1fr;width:210px"><button data-m="paint" class="on">Закрасить</button><button data-m="erase">Ластик</button></div>
-            <span class="hint">Кисть</span><input type="range" class="ip-brush" min="8" max="160" value="36">
-            <button class="btn ip-clear" type="button">Очистить закраску</button>
-          </div>
-          <div class="hint" style="margin-top:8px">Закрасьте то, что нужно переделать. Подойдёт и небольшое пятно: закрасьте с запасом, чтобы края слились.</div>
+          <div class="ip-act"><button class="btn pri ip-open" type="button">✎ Открыть редактор закраски</button><span class="hint ip-state">Ничего не закрашено</span></div>
+          <canvas class="ip-mini" hidden></canvas>
+          <div class="hint" style="margin-top:8px">Редактор открывается на весь экран: масштаб колесом мыши, «рука» для перемещения, кисть, ластик, отмена. Закрасьте то, что нужно переделать, с небольшим запасом, чтобы края слились.</div>
         </div></div>
       <div class="card"><div class="card-h"><h3><span class="n">2</span>Что должно быть на закрашенном месте</h3></div>
         <textarea class="ip-prompt" placeholder="Например: белая майка вместо красной куртки. Лицо, фон и свет оставить как было."></textarea>
@@ -6491,52 +6660,110 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
     </div><div class="preview ip-prev"></div></div>`;
   gridResize($('.grid', root));
   const drop = $('#ipDrop');
-  const edit = $('.ip-edit', root), imgC = $('.ip-img', root), overC = $('.ip-over', root);
-  const ictx = imgC.getContext('2d'), octx = overC.getContext('2d');
-  let mode = 'paint', brush = 36, hasMask = false;
+  const edit = $('.ip-edit', root), imgC = document.createElement('canvas'), overC = document.createElement('canvas');
+  const ictx = imgC.getContext('2d'), octx = overC.getContext('2d', { willReadFrequently: true });
+  let mode = 'paint', brush = 36, hasMask = false, restoring = false, pendingMask = null;
+  const maskBlob = () => new Promise(r => overC.width ? overC.toBlob(r, 'image/png') : r(null));
+  const saveInp = () => WIP.save('inpaint', async () => ({ img: drop._file || null, mask: hasMask ? await maskBlob() : null, prompt: $('.ip-prompt', root).value, size: S.size }));
+  /* full-screen editor: zoom (wheel / buttons), hand (space, middle button or the «Рука» tool), brush, eraser, undo */
+  const ov = document.createElement('div'); ov.className = 'ipx'; ov.hidden = true;
+  ov.innerHTML = `<div class="ipx-bar">
+      <div class="seg ipx-mode" style="grid-template-columns:repeat(3,auto)"><button data-m="paint" class="on" type="button">Кисть</button><button data-m="erase" type="button">Ластик</button><button data-m="hand" type="button">Рука</button></div>
+      <span class="hint">Размер</span><input type="range" class="ipx-brush" min="4" max="300" value="36"><b class="ipx-bv">36</b>
+      <button class="btn ipx-undo" type="button" title="Ctrl+Z">Отменить</button><button class="btn ipx-clear" type="button">Очистить</button>
+      <span class="ipx-sp"></span>
+      <button class="btn ipx-zout" type="button" title="Уменьшить">−</button><b class="ipx-z">100%</b><button class="btn ipx-zin" type="button" title="Увеличить">+</button>
+      <button class="btn ipx-fit" type="button">Вписать</button><button class="btn ipx-100" type="button">100%</button>
+      <button class="btn pri ipx-done" type="button">Готово</button></div>
+    <div class="ipx-view"><div class="ipx-world"></div><div class="ipx-ring" hidden></div></div>
+    <div class="ipx-help">Колесо мыши — масштаб · пробел или средняя кнопка мыши — двигать картинку · Ctrl+Z — отменить · Esc — закрыть</div>`;
+  document.body.append(ov);
+  const view = $('.ipx-view', ov), world = $('.ipx-world', ov), ring = $('.ipx-ring', ov);
+  imgC.className = 'ipx-c'; overC.className = 'ipx-c ipx-over'; world.append(imgC, overC);
+  const tf = { s: 1, x: 0, y: 0 }; let undo = [], space = false;
+  const applyTf = () => { world.style.transform = `translate(${tf.x}px,${tf.y}px) scale(${tf.s})`; $('.ipx-z', ov).textContent = Math.round(tf.s * 100) + '%'; };
+  let autoFit = true;   // follows the window size until the user zooms or moves the picture
+  const fit = () => { autoFit = true; const w = imgC.width, h = imgC.height; if (!w || !view.clientWidth || !view.clientHeight) return; tf.s = Math.min(view.clientWidth / w, view.clientHeight / h) * 0.96; tf.x = (view.clientWidth - w * tf.s) / 2; tf.y = (view.clientHeight - h * tf.s) / 2; applyTf(); };
+  new ResizeObserver(() => { if (autoFit && !ov.hidden) fit(); }).observe(view);
+  const zoomAt = (cx, cy, f) => { autoFit = false; const s2 = Math.min(16, Math.max(0.05, tf.s * f)); tf.x = cx - (cx - tf.x) * s2 / tf.s; tf.y = cy - (cy - tf.y) * s2 / tf.s; tf.s = s2; applyTf(); };
+  const mini = () => {   // the small preview in the card: the picture with the painted place
+    const m = $('.ip-mini', root); if (!imgC.width) return;
+    const k = Math.min(1, 520 / imgC.width); m.width = Math.round(imgC.width * k); m.height = Math.round(imgC.height * k);
+    const c = m.getContext('2d'); c.drawImage(imgC, 0, 0, m.width, m.height); c.drawImage(overC, 0, 0, m.width, m.height); m.hidden = false;
+    $('.ip-state', root).textContent = hasMask ? 'Место закрашено' : 'Ничего не закрашено';
+  };
+  const openEd = () => { if (!imgC.width) return; ov.hidden = false; requestAnimationFrame(fit); };
+  const closeEd = () => { ov.hidden = true; ring.hidden = true; hasMask = !!bbox(); mini(); };
+  const setMode = m => { mode = m; $$('.ipx-mode button', ov).forEach(x => x.classList.toggle('on', x.dataset.m === m)); view.style.cursor = m === 'hand' ? 'grab' : 'none'; if (m === 'hand') ring.hidden = true; };
+  const setBrush = v => { brush = Math.min(300, Math.max(4, Math.round(v))); $('.ipx-brush', ov).value = brush; $('.ipx-bv', ov).textContent = brush; };
+  const snap = () => { undo.push(octx.getImageData(0, 0, overC.width, overC.height)); if (undo.length > 8) undo.shift(); };
   wireDrop(drop, (ok, img) => {
-    if (!ok) { edit.hidden = true; return; }
+    if (!ok) { edit.hidden = true; ov.hidden = true; imgC.width = overC.width = 0; hasMask = false; saveInp(); return; }
     const setup = () => {
       let w = img.naturalWidth, h = img.naturalHeight;   // keep the mask light: cap the long side
       const k = Math.min(1, 1600 / Math.max(w, h));
       w = Math.round(w * k); h = Math.round(h * k);
       imgC.width = overC.width = w; imgC.height = overC.height = h;
+      world.style.width = w + 'px'; world.style.height = h + 'px';
       ictx.drawImage(img, 0, 0, w, h);
-      octx.clearRect(0, 0, w, h);
-      hasMask = false; edit.hidden = false;
+      octx.clearRect(0, 0, w, h); undo = [];
+      hasMask = false; edit.hidden = false; setMode('paint');
+      if (pendingMask) { const pm = pendingMask; pendingMask = null; createImageBitmap(pm).then(b => { octx.drawImage(b, 0, 0, w, h); hasMask = !!bbox(); mini(); }).catch(() => mini()); } else mini();
+      if (!restoring) { openEd(); saveInp(); }   // the picture opens big at once (not when it is restored after a restart)
     };
     if (img.complete && img.naturalWidth) setup(); else img.onload = setup;
   });
-  $$('.ip-mode button', root).forEach(b => b.onclick = () => {
-    mode = b.dataset.m;
-    $$('.ip-mode button', root).forEach(x => x.classList.toggle('on', x === b));
-    overC.style.cursor = mode === 'erase' ? 'cell' : 'crosshair';
+  $('.ip-open', root).onclick = openEd;
+  $('.ipx-done', ov).onclick = closeEd;
+  $$('.ipx-mode button', ov).forEach(b => b.onclick = () => setMode(b.dataset.m));
+  $('.ipx-brush', ov).oninput = e => setBrush(+e.target.value);
+  $('.ipx-clear', ov).onclick = () => { snap(); octx.clearRect(0, 0, overC.width, overC.height); hasMask = false; saveInp(); };
+  $('.ipx-undo', ov).onclick = () => { const s = undo.pop(); if (s) { octx.putImageData(s, 0, 0); hasMask = !!bbox(); saveInp(); } };
+  $('.ipx-fit', ov).onclick = fit;
+  $('.ipx-100', ov).onclick = () => { zoomAt(view.clientWidth / 2, view.clientHeight / 2, 1 / tf.s); };
+  $('.ipx-zin', ov).onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, 1.25);
+  $('.ipx-zout', ov).onclick = () => zoomAt(view.clientWidth / 2, view.clientHeight / 2, 0.8);
+  view.addEventListener('wheel', e => { e.preventDefault(); const r = view.getBoundingClientRect(); zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.15 : 1 / 1.15); }, { passive: false });
+  document.addEventListener('keydown', e => {
+    if (ov.hidden) return;
+    if (e.key === 'Escape') { closeEd(); return; }
+    if (e.key === ' ') { space = true; view.style.cursor = 'grab'; e.preventDefault(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); $('.ipx-undo', ov).onclick(); return; }
+    if (e.key === '[') setBrush(brush / 1.2); else if (e.key === ']') setBrush(brush * 1.2);
   });
-  $('.ip-brush', root).oninput = e => { brush = +e.target.value; };
-  $('.ip-clear', root).onclick = () => { octx.clearRect(0, 0, overC.width, overC.height); hasMask = false; };
-  const pos = e => { const r = overC.getBoundingClientRect(); return [(e.clientX - r.left) * overC.width / r.width, (e.clientY - r.top) * overC.height / r.height]; };
-  let drawing = false, last = null;
+  document.addEventListener('keyup', e => { if (e.key === ' ') { space = false; view.style.cursor = mode === 'hand' ? 'grab' : 'none'; } });
+  const pos = e => { const r = view.getBoundingClientRect(); return [(e.clientX - r.left - tf.x) / tf.s, (e.clientY - r.top - tf.y) / tf.s]; };
+  let drawing = false, panning = null, last = null;
   const dot = (x, y) => { octx.beginPath(); octx.arc(x, y, brush / 2, 0, 7); octx.fill(); };
-  overC.addEventListener('pointerdown', e => {
-    if (edit.hidden) return;
-    e.preventDefault(); overC.setPointerCapture(e.pointerId); drawing = true;
+  const moveRing = e => { if (mode === 'hand' || space || panning) { ring.hidden = true; return; } const r = view.getBoundingClientRect(), d = brush * tf.s;
+    ring.hidden = false; ring.style.width = ring.style.height = d + 'px'; ring.style.left = (e.clientX - r.left - d / 2) + 'px'; ring.style.top = (e.clientY - r.top - d / 2) + 'px'; };
+  view.addEventListener('pointerdown', e => {
+    if (ov.hidden) return;
+    e.preventDefault(); view.setPointerCapture(e.pointerId);
+    if (e.button === 1 || mode === 'hand' || space) { panning = { x: e.clientX - tf.x, y: e.clientY - tf.y }; view.style.cursor = 'grabbing'; ring.hidden = true; return; }
+    if (e.button !== 0) return;
+    snap(); drawing = true;
     const [x, y] = pos(e); last = [x, y];
     octx.globalCompositeOperation = mode === 'erase' ? 'destination-out' : 'source-over';
     octx.fillStyle = octx.strokeStyle = 'rgba(232,38,79,0.85)';
     octx.lineWidth = brush; octx.lineCap = octx.lineJoin = 'round';
     dot(x, y);
   });
-  overC.addEventListener('pointermove', e => {
+  view.addEventListener('pointermove', e => {
+    if (panning) { autoFit = false; tf.x = e.clientX - panning.x; tf.y = e.clientY - panning.y; applyTf(); return; }
+    moveRing(e);
     if (!drawing) return;
     const [x, y] = pos(e);
     octx.beginPath(); octx.moveTo(last[0], last[1]); octx.lineTo(x, y); octx.stroke();
     last = [x, y];
   });
+  view.addEventListener('pointerleave', () => { if (!drawing) ring.hidden = true; });
   const stop = () => {
+    if (panning) { panning = null; view.style.cursor = space || mode === 'hand' ? 'grab' : 'none'; return; }
     if (!drawing) return; drawing = false;
-    hasMask = !!bbox();
+    hasMask = !!bbox(); saveInp();
   };
-  overC.addEventListener('pointerup', stop); overC.addEventListener('pointercancel', stop);
+  view.addEventListener('pointerup', stop); view.addEventListener('pointercancel', stop);
   $$('.ip-q button', root).forEach(b => b.onclick = () => { S.size = b.dataset.s; $$('.ip-q button', root).forEach(x => x.classList.toggle('on', x === b)); });
   $('.ip-q button', root).classList.add('on');
   const bbox = () => {   // painted region, canvas coordinates
@@ -6559,8 +6786,11 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
     const cropC = document.createElement('canvas'); cropC.width = cw; cropC.height = ch;
     cropC.getContext('2d').drawImage(imgC, cx, cy, cw, ch, 0, 0, cw, ch);
     const maskC = document.createElement('canvas'); maskC.width = cw; maskC.height = ch;   // only the painted strokes
-    maskC.getContext('2d').drawImage(overC, cx, cy, cw, ch, 0, 0, cw, ch);
-    return { crop: pngFile(cropC, 'crop.png'), mask: pngFile(maskC, 'mask.png'), x: cx, y: cy };
+    const mctx = maskC.getContext('2d'); mctx.drawImage(overC, cx, cy, cw, ch, 0, 0, cw, ch);
+    const md = mctx.getImageData(0, 0, cw, ch), px4 = md.data;   // the shown paint is 85% see-through: the mask itself must be fully solid
+    for (let i = 3; i < px4.length; i += 4) px4[i] = Math.min(255, px4[i] * 3);
+    mctx.putImageData(md, 0, 0);
+    return { crop: pngFile(cropC, 'crop.png'), mask: pngFile(maskC, 'mask.png'), x: cx, y: cy, w: cw, h: ch };
   };
   imgPanel($('.ip-prev', root), {
     mode: 'qwen', url: '/api/generate/inpaint',
@@ -6571,12 +6801,29 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
       const p = prep();
       const fd = new FormData();
       fd.append('image', pngFile(imgC, 'image.png'));   // the exact picture the mask coordinates belong to
-      fd.append('crop', p.crop); fd.append('mask', p.mask); fd.append('x', p.x); fd.append('y', p.y);
+      fd.append('crop', p.crop); fd.append('mask', p.mask); fd.append('x', p.x); fd.append('y', p.y); fd.append('cw', p.w); fd.append('ch', p.h);
       fd.append('prompt', $('.ip-prompt', root).value.trim()); fd.append('size', S.size);
       imgSeedForm(S, fd); return fd;
     }
   });
   imgSeedWire(root, S);
+  /* keep the work: the picture, the painted place and the text survive a restart; «Очистить процесс» removes them */
+  $('.ip-prompt', root).addEventListener('input', saveInp);
+  $$('.ip-q button', root).forEach(b => b.addEventListener('click', saveInp));
+  $('.ip-clr', root).onclick = () => {
+    octx.clearRect(0, 0, overC.width, overC.height); hasMask = false;
+    const x = $('.x', drop); if (x) x.click();
+    $('.ip-prompt', root).value = ''; WIP.del('inpaint'); toast('Очищено');
+  };
+  (async () => {
+    const st = await WIP.get('inpaint'); if (!st) return;
+    if (st.prompt) $('.ip-prompt', root).value = st.prompt;
+    if (st.size) { const b = $(`.ip-q button[data-s="${st.size}"]`, root); if (b) b.click(); }
+    if (!st.img) return;
+    restoring = true; pendingMask = st.mask || null;
+    fileInto(drop, st.img);
+    setTimeout(() => { restoring = false; }, 1500);
+  })();
 })();
 
 
@@ -6791,7 +7038,7 @@ $('#navCustom').addEventListener('click', () => { $$('.nav').forEach(x => x.clas
 if (API) {
   connectEvents(); loadStatus(); loadCloud(); pollSystem();
   fetch('/api/status').then(r => r.json()).then(s => {
-    firstRun(!s.configured || !localStorage.getItem('h3-seen-settings'));
+    firstRun(!s.configured);
     if (!s.configured) { setNavLocked(true); goTo('models'); return; }
     setTimeout(() => {   // back to the page where the user was last time
       let v = ''; try { v = localStorage.getItem('h3-last-view') || ''; } catch {}
@@ -7294,6 +7541,37 @@ applyZoom();
   };
   const watch = view => { new MutationObserver(() => { if (view.classList.contains('active')) ensure(view); }).observe(view, { attributes: true, attributeFilter: ['class'] }); if (view.classList.contains('active')) ensure(view); };
   $$('.view').forEach(watch);
+})();
+
+/* Editing of images: one page of cards; a card opens the editor already set to that task */
+(() => {
+  const root = $('#view-imgedit'), q = $('#view-qwen');
+  const CARDS = [
+    { id: 'edit', title: 'Править по описанию', text: 'Измените на изображении одежду, цвет, место или детали словами. Всё остальное остаётся прежним.', need: 'изображение + что изменить' },
+    { id: 'inpaint', title: 'Инпейнт', text: 'Закрасьте кистью место и опишите, что там должно быть. Всё, что не закрашено, не тронется.', need: 'изображение + закраска' },
+    { id: 'bg', title: 'Убрать фон', text: 'Объект остаётся на месте, фон становится чисто белым.', need: 'изображение' },
+    { id: 'outpaint', title: 'Расширение', text: 'Достроить изображение до нужного формата: программа дорисует края.', need: 'изображение + новый формат' },
+    { id: 'sheet', title: 'Лист персонажа', text: 'Из одного изображения героя получается лист из 4 или 6 видов с разных сторон.', need: 'изображение героя' },
+    { id: 'story', title: 'Раскадровка', text: 'История в кадрах по изображениям героя и места.', need: 'изображения героя и места' }];
+  root.innerHTML = `<div class="pr-head"><h1>Редактирование изображений</h1><p>Выберите, что хотите сделать с изображением. Всё нужное программа подготовит сама.</p></div>
+    <div class="pr-grid">${CARDS.map(c => `<div class="pr-card" role="button" tabindex="0" data-e="${c.id}"><div class="pr-pic">${navIcon('qwen')}</div>
+      <div class="pr-body"><b>${c.title}</b><p>${c.text}</p><div class="pr-tags"><span>Изображение</span><span>нужно: ${c.need}</span></div></div></div>`).join('')}</div>`;
+  const h1 = $('h1', q), sub = $('.head p', q), t0 = h1.textContent, s0 = sub.textContent, step = $$('.card-h h3', q).find(h => /Что делаем/.test(h.textContent));
+  const plain = () => { if (!q.classList.contains('solo')) return; q.classList.remove('solo'); h1.textContent = t0; sub.textContent = s0; if (step) step.innerHTML = '<span class="n">2</span>Что делаем'; };
+  const open = id => {
+    if (id === 'inpaint') { goTo('inpaint'); return; }
+    const c = CARDS.find(x => x.id === id);
+    q._hub = true; goTo('qwen');
+    $(`.qw-kind button[data-k="${id}"]`, q)?.click();
+    q.classList.add('solo'); h1.textContent = c.title; sub.textContent = c.text;
+    if (step) step.innerHTML = `<span class="n">2</span>${c.title}`;
+  };
+  window.openImgEdit = open;   // the Agent opens the same single-task page as the cards do
+  root.onclick = e => { const c = e.target.closest('.pr-card'); if (c) open(c.dataset.e); };
+  root.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { const c = e.target.closest('.pr-card'); if (c) { e.preventDefault(); open(c.dataset.e); } } };
+  document.addEventListener('click', e => { if (e.target.closest('[data-imgedit]')) goTo('imgedit'); });
+  // entered the editor any other way (Library, Agent, «Использовать в…»): all tasks are available again, as before
+  new MutationObserver(() => { if (!q.classList.contains('active')) return; if (q._hub) q._hub = false; else plain(); }).observe(q, { attributes: true, attributeFilter: ['class'] });
 })();
 </script>
 </body>
