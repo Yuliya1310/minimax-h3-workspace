@@ -6,6 +6,7 @@ The graphs mirror the user's workflows in the project root.
 """
 
 import math
+import re
 
 FPS = 24
 
@@ -821,6 +822,160 @@ def long_part_graph(m, scenes, k, width, height, seed, images, audio=None, start
 ACTION_LOWRES = 0.6  # SelfLift lowres_scale in the original
 
 
+def action_sizes(width, height):
+    """(low-res w, h, full-res w, h) of the action route: pass 1 at 0.6x, the learned upscaler brings it back (aligned to 32)."""
+    s = round(1 / ACTION_LOWRES, 3)
+    lw, lh = r32(width * ACTION_LOWRES), r32(height * ACTION_LOWRES)
+    return lw, lh, max(32, round(lw * s / 32) * 32), max(32, round(lh * s / 32) * 32)
+
+
+def action_part_graph(m, scenes, k, width, height, seed, images, loras, preview=None, state=None, fresh=(), faithful=False,
+                      refiner_args=None, single=False, sing=False, steps=12):
+    """ACTION scene number `k` (0-based) of a scene-by-scene video, the same idea as long_part_graph (scene k continues the saved
+    latent tail of scene k-1, the clip is cut off at the overlap) but with the action model: hybrid, DMAD + Speed Slider,
+    8 steps at 0.6x size, learned latent upscale, 4 steps at full size. The sound is made by the model.
+
+    The tail of the previous scene (full size) is decoded, scaled down and encoded again to continue pass 1 at low size; before
+    pass 2 the true full-size tail is put back in front of the upscaled new part, so the join stays sharp.
+
+    faithful=True: the exact scheme of the original workflow (SelfLiftH3Sampler + H3SigmaRefiner, cleaner picture). The sampler
+    takes the full-size latent with the tail of the previous scene and a noise mask, so there is no separate low-size pass."""
+    plan = long_plan([sc[1] for sc in scenes], fresh=fresh)
+    p, sc = plan[k], scenes[k]
+    new_shot = k > 0 and k < len(fresh) and bool(fresh[k])
+    total, ov = p["total"], p["ov"]
+    cont = k > 0 and not new_shot
+    lw, lh, fw, fh = action_sizes(width, height)
+    if faithful or single:
+        lw, lh, fw, fh = width, height, width, height
+    g = {
+        # `sing`: the model of the Video studio (Singularity Ref2V) under the same action modules (LoRAs, sparse attention, shifts)
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": m["lipsync_unet" if sing else "action_unet"], "weight_dtype": "default"}},
+        "4": {"class_type": "CLIPLoader", "inputs": {"clip_name": m["text_encoder"], "type": "minimax", "device": "default"}},
+        "5": {"class_type": "VAELoader", "inputs": {"vae_name": m["video_vae"]}},
+        "6": {"class_type": "VAELoader", "inputs": {"vae_name": m["audio_vae"]}},
+    }
+    model = _lora_chain(g, ["1", 0], loras)
+    g.update({
+        "2": {"class_type": "ModelAttentionBackend", "inputs": {"model": model, "attention": "comfy kitchen attention"}},
+        "3": {"class_type": "BlockSparseAttention", "inputs": {
+            "model": ["2", 0], "selection": "sol-attn", "selection.tau": 1.3, "start_percent": 0.2, "end_percent": 1.0,
+            "dense_blocks": "", "min_tokens": 12288, "extra_tokens": 256, "sink_conditioning": "exact_kv_and_rows",
+            "verbose": False}},
+        "7": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["3", 0], "shift_video": 12.0, "shift_audio": 3.0}},
+    })
+    mdl = ["7", 0]
+    if preview:
+        g["30"] = {"class_type": "ModelPreviewOverrideKJ", "inputs": {
+            "model": ["7", 0], "max_resolution": 1024, "jpeg_quality": 80, "suppress_default_preview": True,
+            "preview_frames": 1024, "preview_fps": 12, "tiny_vae": preview.get("tiny_vae", "none"), "vae": ["5", 0]}}
+        mdl = ["30", 0]
+    g.update({
+        "10": {"class_type": "BasicScheduler", "inputs": {"model": mdl, "scheduler": "simple", "steps": steps, "denoise": 1.0}},
+        "12": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "9": {"class_type": "SplitSigmas", "inputs": {"sigmas": ["10", 0], "step": 8}},
+    })
+    nid = [200]
+
+    def add(cls, **inputs):
+        nid[0] += 1
+        g[str(nid[0])] = {"class_type": cls, "inputs": inputs}
+        return str(nid[0])
+
+    ref = add("MiniMaxH3ReferenceToVideo", clip=["4", 0], vae=["5", 0], audio_vae=["6", 0], prompt=sc[0],
+              width=lw, height=lh, length=total, ref_image_size="max")
+    own = list(sc[2]) if len(sc) > 2 and sc[2] else []
+    _refs(g, ref, own or images, base=100)
+    new = add("LTXVSeparateAVLatent", av_latent=[ref, 1])
+    stages = {}
+    old_full = None
+    if not cont:
+        v_lat = [new, 0]
+    else:
+        old_full = add("LoadLatent", latent=state)
+        if faithful or single:   # full-size tail goes in as it is
+            old_low = old_full
+        else:
+            dec = add("VAEDecode", samples=[old_full, 0], vae=["5", 0])
+            n_dec = round((LONG_STATE_TOKENS - 2) / 5 * 17 + 5)   # frames in the saved tail
+            last = add("ImageFromBatch", image=[dec, 0], batch_index=max(0, n_dec - ov), length=ov)
+            fit = add("ImageScale", image=[last, 0], upscale_method="lanczos", width=lw, height=lh, crop="center")
+            old_low = add("VAEEncode", pixels=[fit, 0], vae=["5", 0])
+            stages.update({n: "encode" for n in (dec, last, fit)})
+        t_ov, t_tot = _tokens(ov), _tokens(total)
+        cut = add("LatentCut", samples=[old_low, 0], dim="t", index=-t_ov, amount=t_ov)
+        cat = add("LatentConcat", samples1=[cut, 0], samples2=[new, 0], dim="t")
+        cut2 = add("LatentCut", samples=[cat, 0], dim="t", index=0, amount=t_tot)
+        black = add("EmptyImage", width=round(lw / 16), height=round(lh / 16), batch_size=t_ov, color=0)
+        white = add("EmptyImage", width=round(lw / 16), height=round(lh / 16), batch_size=max(1, t_tot - t_ov), color=16777215)
+        both = add("ImageBatch", image1=[black, 0], image2=[white, 0])
+        vmask = add("ImageToMask", image=[both, 0], channel="red")
+        if faithful:   # SelfLift wants a mask of shape [1, 1, T, H, W]; this node (ComfyUI-LTXVideo) builds it from one mask per latent frame
+            v_lat = [add("LTXVSetVideoLatentNoiseMasks", samples=[cut2, 0], masks=[vmask, 0]), 0]
+        else:
+            v_lat = [add("SetLatentNoiseMask", samples=[cut2, 0], mask=[vmask, 0]), 0]
+        stages.update({n: "encode" for n in (old_full, old_low)})
+    lat = add("LTXVConcatAVLatent", video_latent=v_lat, audio_latent=[new, 1])
+    noise = add("RandomNoise", noise_seed=seed + 100 * k)
+    if faithful:
+        neg = add("ConditioningZeroOut", conditioning=[ref, 0])
+        refiner = add("H3SigmaRefiner", sigmas=["10", 0], **(refiner_args or {"extra_steps": 1, "strength": 0.7, "offset": 0.0, "curve": "cosine"}))
+        # the sampler cannot tile the high-resolution stage together with a noise mask: only the first scene may use the tiling
+        smp = add("SelfLiftH3Sampler", model=mdl, positive=[ref, 0], negative=[neg, 0], vae=["5", 0], latent_image=[lat, 0],
+                  sampler=["12", 0], sigmas=[refiner, 0], seed=seed + 100 * k, cfg=1.0, transition_step=8, lowres_scale=ACTION_LOWRES,
+                  rho=0.0, w_min=0.5, w_max=1.0, upscaler_model=m["action_upscaler"], highres_tiling=not cont, upscaler_unload=True)
+    elif single:   # the way of the Video studio: one pass at full size, the tail of the previous scene kept by the noise mask
+        guider = add("BasicGuider", model=mdl, conditioning=[ref, 0])
+        smp1 = add("SamplerCustomAdvanced", noise=[noise, 0], guider=[guider, 0], sampler=["12", 0], sigmas=["10", 0], latent_image=[lat, 0])
+    else:
+        guider = add("BasicGuider", model=mdl, conditioning=[ref, 0])
+        smp1 = add("SamplerCustomAdvanced", noise=[noise, 0], guider=[guider, 0], sampler=["12", 0], sigmas=["9", 0], latent_image=[lat, 0])
+        sep = add("LTXVSeparateAVLatent", av_latent=[smp1, 1])
+        up = add("MinimaxH3LatentUpscaler3D", latent=[sep, 0], model_name=m["upscaler"], mode="scale by multiplier",
+                 **{"mode.scale": round(1 / ACTION_LOWRES, 3)}, align=32, enable_temporal_chunking=True,
+                 force_unload=True, device="cuda", precision="fp16")
+    if faithful:
+        final, smp_stages = [smp, 0], {smp: "sample", refiner: "encode"}
+    elif single:
+        final, smp_stages = [smp1, 1], {smp1: "sample"}
+    elif cont:   # the sharp full-size tail of the previous scene in front of the new, upscaled part
+        t_ov, t_tot = _tokens(ov), _tokens(total)
+        tail_f = add("LatentCut", samples=[old_full, 0], dim="t", index=-t_ov, amount=t_ov)
+        part = add("LatentCut", samples=[up, 0], dim="t", index=t_ov, amount=t_tot - t_ov)
+        catf = add("LatentConcat", samples1=[tail_f, 0], samples2=[part, 0], dim="t")
+        black = add("EmptyImage", width=round(fw / 16), height=round(fh / 16), batch_size=t_ov, color=0)
+        white = add("EmptyImage", width=round(fw / 16), height=round(fh / 16), batch_size=max(1, t_tot - t_ov), color=16777215)
+        both = add("ImageBatch", image1=[black, 0], image2=[white, 0])
+        vmask = add("ImageToMask", image=[both, 0], channel="red")
+        v2 = [add("SetLatentNoiseMask", samples=[catf, 0], mask=[vmask, 0]), 0]
+    else:
+        v2 = [up, 0]
+    if not faithful and not single:
+        lat2 = add("LTXVConcatAVLatent", video_latent=v2, audio_latent=[sep, 1])
+        smp2 = add("SamplerCustomAdvanced", noise=[noise, 0], guider=[guider, 0], sampler=["12", 0], sigmas=["9", 1], latent_image=[lat2, 0])
+        final = [smp2, 1]
+        smp_stages = {smp1: "sample", sep: "upscale", up: "upscale", smp2: "sample2"}
+    img = add("VAEDecode", samples=final, vae=["5", 0])
+    clip_len = total - ov
+    frames_out = [img, 0] if not cont else [add("ImageFromBatch", image=[img, 0], batch_index=ov, length=clip_len), 0]
+    dec_a = add("VAEDecodeAudio", samples=final, vae=["6", 0])
+    aud = [dec_a, 0] if not cont else [add("TrimAudioDuration", audio=[dec_a, 0], start_index=round(ov / FPS, 3),
+                                              duration=round(clip_len / FPS, 3)), 0]
+    aud = _audio_fade(add, aud, round(clip_len / FPS, 3), head=cont, tail=True)
+    vid = add("CreateVideo", images=frames_out, audio=aud, fps=float(FPS), bit_depth="auto", color_space="sRGB", codec="none")
+    save = add("SaveVideo", video=[vid, 0], filename_prefix="H3Workspace/long_part", format="auto", **{"format.codec": "auto"})
+    sep2 = add("LTXVSeparateAVLatent", av_latent=final)
+    tail = add("LatentCut", samples=[sep2, 0], dim="t", index=-LONG_STATE_TOKENS, amount=LONG_STATE_TOKENS)
+    keep = add("SaveLatent", samples=[tail, 0], filename_prefix="H3Workspace/long_state")
+    stages.update({n: "load" for n in ["1", "2", "3", "4", "5", "6", "7"] + [x for x in g if x.isdigit() and 60 <= int(x) < 70]})
+    if preview:
+        stages["30"] = "load"
+    stages.update({ref: "encode", img: "decode", dec_a: "decode", vid: "save", save: "save", sep2: "save", tail: "save", keep: "save"})
+    stages.update(smp_stages)
+    stages["__scenes__"] = {"n": len(scenes), "map": {n: k for n, s in smp_stages.items() if s.startswith("sample")}}   # progress text "scene 2 of 4"
+    return g, stages
+
+
 def action_graph(m, prompt, width, height, seconds, seed, images, audios, faithful, loras, preview=None):
     """PM Minimax H3 Best Action Workflow (Prompt Mastery): hybrid model, sol-attn, 8 low-res + 4 high-res steps.
 
@@ -1094,6 +1249,151 @@ def _qwen_base(m, image, megapixels, prompt, seed, size=None, extras=()):
     for k in (2, 3):
         stages[f"12{k}"] = stages[f"13{k}"] = "encode"
     return g, stages
+
+
+H3IMG_MP = {"4": 4.0, "8": 8.0, "16": 16.0}   # the model is tuned for about 4 megapixels and up (2048x2048); best around 16
+H3IMG_MAX_REFS = 5
+
+
+def h3img_size(aspect, megapixels):
+    """Width and height (multiples of 32) of the given aspect ratio and area in megapixels."""
+    try:
+        aw, ah = (float(x) for x in str(aspect).split(":"))
+        assert aw > 0 and ah > 0
+    except (ValueError, AssertionError):
+        aw, ah = 1.0, 1.0
+    px = megapixels * 1_000_000
+    return r32(math.sqrt(px * aw / ah)), r32(math.sqrt(px * ah / aw))
+
+
+def _h3img_base(m):
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": m["h3img_unet"], "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": m["text_encoder"], "type": "minimax", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": m["h3img_vae"]}},
+        "4": {"class_type": "ModelAttentionBackend", "inputs": {"model": ["1", 0], "attention": "comfy kitchen attention"}},
+    }
+
+
+def h3img_t2i_graph(m, prompt, width, height, seed):
+    """MiniMax H3 Image, picture by text (the official t2i workflow): 6 steps, CFG 1, no negative prompt. No prompt enhancer: the
+    prompt is written by the agent's skill."""
+    g = _h3img_base(m)
+    g.update({
+        "5": {"class_type": "MiniMaxH3ImageConditioning", "inputs": {"prompt": prompt, "width": width, "height": height,
+                                                                        "clip": ["2", 0], "vae": ["3", 0]}},
+        "6": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "7": {"class_type": "BasicGuider", "inputs": {"model": ["4", 0], "conditioning": ["5", 0]}},
+        "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+        "9": {"class_type": "BasicScheduler", "inputs": {"model": ["4", 0], "scheduler": "beta", "steps": 6, "denoise": 1.0}},
+        "10": {"class_type": "SamplerCustomAdvanced", "inputs": {
+            "noise": ["6", 0], "guider": ["7", 0], "sampler": ["8", 0], "sigmas": ["9", 0], "latent_image": ["5", 1]}},
+        "11": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
+        "12": {"class_type": "SaveImage", "inputs": {"filename_prefix": "H3Workspace/h3img", "images": ["11", 0]}},
+    })
+    stages = {"1": "load", "2": "load", "3": "load", "4": "load", "5": "encode", "6": "encode", "7": "encode", "8": "encode",
+              "9": "encode", "10": "sample", "11": "decode", "12": "save"}
+    return g, stages
+
+
+def h3img_edit_graph(m, prompt, images, megapixels, seed, size=None, ref_mp=None):
+    """MiniMax H3 Image with reference pictures (up to H3IMG_MAX_REFS): <Picture 1> is the picture to edit (and gives the shape of the
+    result unless `size` is given), the others are style / character / object references. Every picture is scaled to about
+    `ref_mp` (default: `megapixels`); the size of the result follows the first picture scaled to `megapixels` (multiples of 32).
+    A small `ref_mp` with a big `megapixels` gives a big clean result without feeding huge references to the model."""
+    g = _h3img_base(m)
+    ref_mp = ref_mp or megapixels
+    stages = {"1": "load", "2": "load", "3": "load", "4": "load"}
+    cond = {"prompt": prompt, "clip": ["2", 0], "vae": ["3", 0]}
+    for i, name in enumerate(list(images)[:H3IMG_MAX_REFS]):
+        lid, rid = f"2{i}0", f"2{i}1"
+        g[lid] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        g[rid] = {"class_type": "ResizeImageMaskNode", "inputs": {
+            "resize_type": "scale total pixels", "resize_type.megapixels": ref_mp, "scale_method": "area", "input": [lid, 0]}}
+        last = rid
+        if i == 0:
+            src = rid
+            if ref_mp != megapixels:   # the size of the result comes from the same picture at the bigger area
+                g["219"] = {"class_type": "ResizeImageMaskNode", "inputs": {
+                    "resize_type": "scale total pixels", "resize_type.megapixels": megapixels, "scale_method": "area", "input": [lid, 0]}}
+                src = "219"
+                stages["219"] = "encode"
+            g["220"] = {"class_type": "ResizeImageMaskNode", "inputs": {
+                "resize_type": "scale to multiple", "resize_type.multiple": 32, "scale_method": "area", "input": [src, 0]}}
+            g["221"] = {"class_type": "GetImageSize", "inputs": {"image": ["220", 0]}}
+            last = "220" if ref_mp == megapixels else rid   # the model gets the picture at `ref_mp`
+            stages.update({"220": "encode", "221": "encode"})
+        cond[f"images.image_{i}"] = [last, 0]
+        stages.update({lid: "encode", rid: "encode"})
+    cond["width"], cond["height"] = (size[0], size[1]) if size else (["221", 0], ["221", 1])
+    g.update({
+        "5": {"class_type": "MiniMaxH3ImageConditioning", "inputs": cond},
+        "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
+        "7": {"class_type": "KSampler", "inputs": {
+            "seed": seed, "steps": 6, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1,
+            "model": ["4", 0], "positive": ["5", 0], "negative": ["6", 0], "latent_image": ["5", 1]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "H3Workspace/h3img_edit", "images": ["8", 0]}},
+    })
+    stages.update({"5": "encode", "6": "encode", "7": "sample", "8": "decode", "9": "save"})
+    return g, stages
+
+
+H3IMG_SHEET_SIZE = (3840, 2176)    # about 8 MP: at 4 MP (the lower limit of the model) the picture is grainy, 8-16 MP is clean
+H3IMG_SHEET6_SIZE = (4352, 1984)
+H3IMG_FRAME_SIZE = (3328, 1856)    # one storyboard frame, about 6 MP
+
+
+def h3img_tags(text):
+    """The prompts written for Qwen call the pictures <image1>, <image2>; MiniMax H3 Image calls them <Picture 1>, <Picture 2>."""
+    return re.sub(r"<image\s*(\d)>", r"<Picture \1>", text)
+
+
+def h3img_sheet_graph(m, image, seed, headless=True, background="grey", marks="", panels=4, mp=None):
+    """Character sheet from one picture on MiniMax H3 Image (the same sheet text as for Qwen, tags <Picture 1>).
+    `mp`: area of the whole sheet in megapixels (the panels share it: a sheet needs 8-16 MP to look clean)."""
+    prompt = h3img_tags(sheet_prompt(headless, background, marks, panels))
+    size = h3img_size("11:5" if panels == 6 else "16:9", mp) if mp else (H3IMG_SHEET6_SIZE if panels == 6 else H3IMG_SHEET_SIZE)
+    g, stages = h3img_edit_graph(m, prompt, [image], 2.0, seed, size)
+    return g, stages, prompt
+
+
+def h3img_story_graph(m, images, prompt, seed, size=H3IMG_SHEET_SIZE):
+    """Storyboard as ONE picture from 1-5 pictures (character, location...): <Picture 1>, <Picture 2> in the prompt."""
+    return h3img_edit_graph(m, prompt, images, 2.0, seed, size)
+
+
+def h3img_frames_graph(m, refs, prompts, seed, size=H3IMG_FRAME_SIZE, line="white"):
+    """The frame-by-frame storyboard on MiniMax H3 Image: every frame is its own picture, the sheet is glued from them."""
+    g = _h3img_base(m)
+    stages = {"1": "load", "2": "load", "3": "load", "4": "load"}
+    scaled = []
+    for i, img in enumerate(list(refs)[:H3IMG_MAX_REFS]):
+        a, b = f"10{i}", f"11{i}"
+        g[a] = {"class_type": "LoadImage", "inputs": {"image": img}}
+        g[b] = {"class_type": "ResizeImageMaskNode", "inputs": {
+            "resize_type": "scale total pixels", "resize_type.megapixels": 2.0, "scale_method": "area", "input": [a, 0]}}
+        scaled.append(b)
+        stages[a] = stages[b] = "encode"
+    titles, frame_nodes = {}, []
+    for i, text in enumerate(prompts):
+        base = 200 + i * 10
+        en, zr, ks, dc, sv = (str(base + k) for k in range(5))
+        cond = {"prompt": text, "width": size[0], "height": size[1], "clip": ["2", 0], "vae": ["3", 0]}
+        for k, b in enumerate(scaled):
+            cond[f"images.image_{k}"] = [b, 0]
+        g[en] = {"class_type": "MiniMaxH3ImageConditioning", "inputs": cond}
+        g[zr] = {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": [en, 0]}}
+        g[ks] = {"class_type": "KSampler", "inputs": {
+            "seed": seed + i, "steps": 6, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1,
+            "model": ["4", 0], "positive": [en, 0], "negative": [zr, 0], "latent_image": [en, 1]}}
+        g[dc] = {"class_type": "VAEDecode", "inputs": {"samples": [ks, 0], "vae": ["3", 0]}}
+        g[sv] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "H3Workspace/story_frame", "images": [dc, 0]}}
+        stages.update({en: "encode", zr: "encode", ks: "sample", dc: "decode", sv: "save"})
+        titles[sv] = f"Кадр {i + 1}"
+        frame_nodes.append([dc, 0])
+    _glue(g, stages, titles, frame_nodes, line)
+    return g, stages, titles
 
 
 def flux_t2i_graph(m, prompt, width, height, seed):

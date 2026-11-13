@@ -103,6 +103,7 @@ def round_size(form, step=32, low=256, high=2048, max_px=2200000):
     return r(w), r(h)
 
 
+H3IMG_MAX_PX = 20_000_000   # MiniMax H3 Image works at 4-20 MP: its own size limit is much higher than for the other picture models
 SUPPORT_URL = "https://pay.cloudtips.ru/p/0e4d4824"
 # Immers.Cloud: the author's referral link goes here (a discount for the new user, a bonus for the author). Empty: the plain site is opened.
 RENT_REFERRAL = "https://immers.cloud/signup/r/20240927-7463913-939/"
@@ -340,7 +341,7 @@ class App:
         names, found, entries = {}, set(), {}
         for role, variant in self.choice().items():
             entry = entries[role] = catalog.model_entry(role, variant)
-            picked = (self.config.get("model_pick") or {}).get(role) if self.config.get("engine") != "managed" else None  # a file the user chose by hand (never in «Я новичок»: the set is fixed)
+            picked = (self.config.get("model_pick") or {}).get(role) if not self.locked() else None  # a file the user chose by hand (never in «Я новичок»: the set is fixed)
             def seen(file):
                 ok = {file, *catalog.FILE_ALIASES.get(file, ())}  # same file under another name (e.g. upscaler from Hugging Face)
                 return next((n for n in visible[entry["category"]] if n.replace("/", "\\").split("\\")[-1] in ok), None)
@@ -354,7 +355,7 @@ class App:
             if hit:
                 found.add(role)
         # modes added after a set-up was made: with your own ComfyUI they switch on by themselves when the files are there
-        self.auto_modes = {m for m in ("krea", "kreareal", "qwen", "flux", "upscale", "long") if self.config.get("engine") == "external"
+        self.auto_modes = {m for m in ("krea", "kreareal", "qwen", "flux", "h3img", "upscale", "long") if self.config.get("engine") == "external"
                            and all(r in found for r in catalog.MODE_ROLES[m])}
         needed = catalog.roles_for(self.modes())
         missing = [entries[r] for r in needed if r in entries and r not in found]
@@ -522,7 +523,7 @@ class App:
                         sfx = "_d" if lg.get("draft") else ""
                         (d / f"state_{lg['part']}{sfx}.latent").write_bytes(body)
                         (d / f"state_{lg['part']}{sfx}.json").write_text(
-                            json.dumps({"res": (job.get("meta") or {}).get("res", "")}, ensure_ascii=False), encoding="utf-8")
+                            json.dumps({"res": (job.get("meta") or {}).get("res", ""), "kind": lg.get("kind", "")}, ensure_ascii=False), encoding="utf-8")
                 except Exception as e:
                     self.note_error(f"Не удалось сохранить состояние сцены: {e}")
         images = [f for f in files if f["filename"].lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
@@ -598,7 +599,12 @@ class App:
         return Path(d) if d else self.default_results_dir()
 
     def keep_copies(self):
-        return self.config.get("keep_copies") is not False
+        """Own copies of the results. «Я новичок» keeps them as before; with the user's own ComfyUI there is NO copy by default (its output
+        folder is the one place of the files, a second copy would only be a duplicate); the user can switch a copy on and choose its folder."""
+        v = self.config.get("keep_copies")
+        if v is not None:
+            return bool(v)
+        return self.config.get("engine") != "external"
 
     async def archive_item(self, item):
         """Copy the finished file of a library item into the program's own results folder."""
@@ -665,7 +671,7 @@ class App:
 
     async def h_status(self, _req):
         base = {"configured": bool(self.config.configured or self.comfy_override),
-                "engine": self.config.get("engine"), "installing": bool(self.installer),
+                "engine": self.config.get("engine"), "full_mode": bool(self.config.get("full_mode")), "installing": bool(self.installer),
                 "saved_modes": self.config.get("modes") or []}
         try:
             stats = await self.system_stats()
@@ -832,7 +838,7 @@ class App:
                                   "picked": picked.get(role), "name": self.model_names.get(role)})
 
     async def h_models_pick(self, req):
-        if self.config.get("engine") == "managed":
+        if self.locked():
             raise web.HTTPForbidden(text="В режиме «Я новичок» модели подобраны и менять их нельзя: так всё работает без сбоев.")
         body = await req.json()
         role, name = body.get("role"), body.get("name") or ""
@@ -1207,6 +1213,62 @@ class App:
         webbrowser.open(SUPPORT_URL)
         return web.json_response({"ok": True})
 
+    DMAD_URL = "https://civitai.com/models/2837571?modelVersionId=3391964"   # the exact version «dmad_larryvrhv4_merge» (a fixed address)
+
+    def dmad_dir(self):
+        """Where the DMAD LoRA goes: loras\\MinimaxH3 of the app's own ComfyUI; with an own ComfyUI only when its models folder is known."""
+        if self.config.get("engine") == "managed":
+            root = self.comfy_root()
+            return root / "ComfyUI" / "models" / "loras" / "MinimaxH3" if root else None
+        ext = (self.config.get("ext_models_dir") or "").strip()
+        return Path(ext) / "loras" / "MinimaxH3" if ext else None
+
+    async def h_open_dmad(self, _req):
+        """Open the page of the DMAD LoRA on Civitai (the exact version) in the user's browser."""
+        webbrowser.open(self.DMAD_URL)
+        return web.json_response({"ok": True, "url": self.DMAD_URL})
+
+    async def h_dmad_folder(self, _req):
+        """Open (and create) the folder where the DMAD file belongs."""
+        d = self.dmad_dir()
+        if not d:
+            raise web.HTTPBadRequest(text="Папка вашего ComfyUI программе не известна: положите файл в models\\loras\\MinimaxH3 вашего ComfyUI.")
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.Popen(["explorer", str(d)])
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "path": str(d)})
+
+    async def h_dmad_install(self, _req):
+        """«I have downloaded it»: find the DMAD file in the Downloads (or Desktop) folder and move it to the loras folder."""
+        d = self.dmad_dir()
+        if not d:
+            raise web.HTTPBadRequest(text="Папка вашего ComfyUI программе не известна: положите файл в models\\loras\\MinimaxH3 вашего ComfyUI.")
+        names = {n.lower() for n in catalog.ACTION_DMAD_FILES}
+        names |= {n.lower().replace(".safetensors", "") + " (1).safetensors" for n in catalog.ACTION_DMAD_FILES}   # a browser adds « (1)» to a repeated download
+
+        def work():
+            found = []
+            for base in (Path.home() / "Downloads", Path.home() / "Desktop"):
+                if base.is_dir():
+                    found += [f for f in base.iterdir() if f.is_file() and f.name.lower() in names]
+            if not found:
+                return None
+            src = max(found, key=lambda f: f.stat().st_size)   # the big file (3.9 GB) rather than the small «_fro» one
+            d.mkdir(parents=True, exist_ok=True)
+            dst = d / catalog.ACTION_DMAD_FILES[-1]
+            if src.stat().st_size < 3_000_000_000:
+                dst = d / src.name.replace(" (1)", "")
+            if dst.exists():
+                return dst   # already there
+            shutil.move(str(src), str(dst))
+            return dst
+        dst = await asyncio.to_thread(work)
+        if not dst:
+            raise web.HTTPNotFound(text="Не нашёл файл в папках «Загрузки» и «Рабочий стол». Скачайте minimax_h3_dmad_full_dareties_v4_step600_comfy.safetensors на странице Civitai и нажмите эту кнопку снова. Файл на 500 МБ (Turbo) не подходит.")
+        return web.json_response({"ok": True, "path": str(dst), "name": dst.name})
+
     async def h_rent_open(self, _req):
         """Open the rental site (the author's referral link if there is one): a fixed address, never taken from the request."""
         webbrowser.open(RENT_REFERRAL or RENT_SITE)
@@ -1526,7 +1588,7 @@ class App:
                 crop = await self.upload_input(field)
             elif field.name == "orig" and field.filename:
                 form["_orig"] = await self.upload_input(field)
-            elif field.name in ("image2", "image3") and field.filename:
+            elif field.name in ("image2", "image3", "image4", "image5") and field.filename:
                 extra.append(await self.upload_input(field))
             else:
                 form[field.name] = await field.text()
@@ -1692,6 +1754,14 @@ class App:
             return await self.queue(graph, stages, {
                 "mode": "krea", "sub": "Изображение (FLUX.2)", "prompt": prompt, "aspect": aspect, "q": "1K",
                 "len": 0.0, "res": f"{width}×{height}", "seed": seed, **lab})
+        if engine == "h3img":   # MiniMax H3 Image: the size comes from the format and the area (megapixels), not from the 1 MP table
+            await self.need_models("h3img")
+            mp = wf.H3IMG_MP.get(form.get("mp", "4"), 4.0)
+            width, height = round_size(form, high=8192, max_px=H3IMG_MAX_PX) or wf.h3img_size(aspect, mp)   # the own size is not cut to 2 MP here
+            graph, stages = wf.h3img_t2i_graph(self.model_names, prompt, width, height, seed)
+            return await self.queue(graph, stages, {
+                "mode": "krea", "sub": "Изображение (MiniMax H3 Image)", "prompt": prompt, "aspect": aspect, "q": f"{mp:g} МП",
+                "len": 0.0, "res": f"{width}×{height}", "seed": seed, **lab})
         if engine == "qwen":
             await self.need_models("qwen")
             graph, stages = wf.qwen_t2i_graph(self.model_names, prompt, form.get("negative", "").strip()[:600], width, height, seed)
@@ -1713,7 +1783,8 @@ class App:
     async def h_generate_qwen(self, req):
         form, image, seed = await self.read_image_form(req)
         flux = form.get("kind") != "sheet" and form.get("engine") == "flux"
-        await self.need_models("flux" if flux else "qwen")
+        h3 = form.get("engine") == "h3img" and form.get("kind", "edit") in ("edit", "story", "sheet")   # MiniMax H3 Image: edit / storyboard / character sheet, up to 5 reference pictures
+        await self.need_models("h3img" if h3 else "flux" if flux else "qwen")
         if form.get("kind") == "bg":   # one click: the background becomes plain white, the subject stays untouched
             if not image:
                 raise web.HTTPBadRequest(text="Загрузите изображение")
@@ -1751,13 +1822,14 @@ class App:
         if form.get("kind") == "story" and form.get("frames") == "1":
             # storyboard frame by frame (FLUX.2 klein): every frame is its own picture, the sheet is glued from them
             use_qwen = form.get("engine") == "qwen"
-            await self.need_models("qwen" if use_qwen else "flux")
+            await self.need_models("h3img" if h3 else "qwen" if use_qwen else "flux")
             frames = split_frames(form.get("prompt", ""))
             if len(frames) not in wf.FRAME_COLS:
                 raise web.HTTPBadRequest(text=f"Нужно 2, 3, 4, 6, 8 или 9 кадров, а в описании их {len(frames)}. Напишите каждый кадр с новой строки: «1: ...», «2: ...».")
             refs = [x for x in ([image] if image else []) + list(form.get("_extra") or [])]
-            build = wf.qwen_frames_graph if use_qwen else wf.flux_frames_graph
-            graph, stages, titles = build(self.model_names, refs, frames, seed, size=round_size(form) or wf.FRAME_SIZE, line=form.get("line", "white"))
+            build = wf.h3img_frames_graph if h3 else wf.qwen_frames_graph if use_qwen else wf.flux_frames_graph
+            graph, stages, titles = build(self.model_names, refs, frames, seed, size=(round_size(form, high=8192, max_px=H3IMG_MAX_PX) or wf.h3img_size("16:9", min(wf.H3IMG_MP.get(form.get("size", "8"), 8.0), 8.0))) if h3 else (round_size(form) or wf.FRAME_SIZE),   # a frame: up to 8 MP (9 frames of 16 MP would take an hour)
+                                          line=form.get("line", "white"))
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Раскадровка по кадрам", "prompt": form.get("prompt", "").strip(), "aspect": "",
                 "q": "", "len": 0.0, "res": "", "seed": seed}, titles=titles)
@@ -1769,13 +1841,26 @@ class App:
                 raise web.HTTPBadRequest(text="Опишите историю по кадрам")
             refs = [image] + list(form.get("_extra") or [])
             sz = round_size(form) or wf.STORY_SIZE
-            if flux:
+            if h3:
+                graph, stages = wf.h3img_story_graph(self.model_names, refs, prompt, seed, round_size(form, high=8192, max_px=H3IMG_MAX_PX) or wf.h3img_size("16:9", wf.H3IMG_MP.get(form.get("size", "16"), 16.0)))
+            elif flux:
                 graph, stages = wf.flux_story_graph(self.model_names, refs, prompt, seed, sz)
             else:
                 graph, stages = wf.qwen_story_graph(self.model_names, refs, prompt, seed, sz)
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Раскадровка по изображениям", "prompt": prompt, "aspect": "",
                 "q": "", "len": 0.0, "res": "%d×%d" % wf.STORY_SIZE, "seed": seed})
+        if h3 and form.get("kind", "edit") == "edit":
+            prompt = form.get("prompt", "").strip()
+            if not prompt:
+                raise web.HTTPBadRequest(text="Напишите, что сделать с изображениями")
+            mp = wf.H3IMG_MP.get(form.get("size", "4"), 4.0)
+            size = round_size(form, high=8192, max_px=H3IMG_MAX_PX) or (wf.h3img_size(form["aspect"], mp) if form.get("aspect") else None)
+            refs = [image] + list(form.get("_extra") or [])
+            graph, stages = wf.h3img_edit_graph(self.model_names, prompt, refs, mp, seed, size, min(mp, 4.0))
+            return await self.queue(graph, stages, {
+                "mode": "qwen", "sub": f"Правка (MiniMax H3 Image, картинок: {len(refs)})", "prompt": prompt, "aspect": form.get("aspect", ""),
+                "q": f"{mp:g} МП", "len": 0.0, "res": "%d×%d" % size if size else "", "seed": seed})
         if flux:
             prompt = form.get("prompt", "").strip()
             if not prompt:
@@ -1787,10 +1872,12 @@ class App:
                 "q": "", "len": 0.0, "res": "", "seed": seed})
         if form.get("kind") == "sheet":
             panels = 6 if form.get("panels") == "6" else 4
-            graph, stages, prompt = wf.qwen_sheet_graph(
+            sheet_mp = wf.H3IMG_MP.get(form.get("size", "16"), 16.0)
+            kw = {"mp": sheet_mp} if h3 else {}
+            graph, stages, prompt = (wf.h3img_sheet_graph if h3 else wf.qwen_sheet_graph)(
                 self.model_names, image, seed, headless=form.get("headless", "1") != "0",
-                background=form.get("background", "grey"), marks=form.get("marks", "")[:300], panels=panels)
-            sub, res = "Лист персонажа", "%d×%d" % (wf.SHEET6_SIZE if panels == 6 else wf.SHEET_SIZE)
+                background=form.get("background", "grey"), marks=form.get("marks", "")[:300], panels=panels, **kw)
+            sub, res = "Лист персонажа", "%d×%d" % (wf.h3img_size("11:5" if panels == 6 else "16:9", sheet_mp) if h3 else (wf.SHEET6_SIZE if panels == 6 else wf.SHEET_SIZE))
             prompt = "Лист персонажа" + (" (6 панелей)" if panels == 6 else "") + (": " + form["marks"].strip()[:80] if form.get("marks", "").strip() else "")
         else:
             prompt = form.get("prompt", "").strip()
@@ -1896,7 +1983,7 @@ class App:
     def custom_loras(self, mode=None):
         """(file, strength) for the LoRAs the user added by hand on the Models screen (not used with the cloud).
         A LoRA can be switched off in single modes (right in the mode, in the «Модель» row): its `skip` lists those modes."""
-        if self.rh() or self.config.get("engine") == "managed":   # «Я новичок»: only the LoRAs of the ready workflows
+        if self.rh() or self.locked():   # «Я новичок»: only the LoRAs of the ready workflows
             return []
         return [(x["file"], float(x["strength"])) for x in self.unique_loras() if x.get("on", True) and mode not in (x.get("skip") or [])]
 
@@ -1921,7 +2008,7 @@ class App:
         return web.json_response({"files": files or [], "items": items})
 
     async def h_loras_custom_set(self, req):
-        if self.config.get("engine") == "managed":
+        if self.locked():
             raise web.HTTPForbidden(text="В режиме «Я новичок» свои LoRA не подключаются: всё уже настроено.")
         items = []
         for x in (await req.json()).get("items", [])[:10]:
@@ -2142,7 +2229,8 @@ class App:
         return web.FileResponse(f)
 
     async def h_generate_long(self, req):
-        await self.need_models("long")
+        if req.query.get("kind") != "action":   # the action scenes (page «Экшн» → «По сценам») need the action models instead
+            await self.need_models("long")
         self._capture = {}
         try:
             return await self.generate_long(req)
@@ -2165,7 +2253,22 @@ class App:
         fresh = [fr for *_, fr in scenes]   # a scene marked as a NEW SHOT does not continue the previous one (no quality loss)
         scenes = [(p, sec, extra) for p, sec, extra, _ in scenes]
         test = form.get("test") == "1"   # a size test of one scene: stand-alone, does not touch the other scenes
-        draft = form.get("draft") == "1" and not test   # quick draft: 4 steps, smaller frame; the finished row is made later with the same seed
+        action = form.get("kind") == "action"   # action scenes: the action model, 8+4 steps, scene by scene (see wf.action_part_graph)
+        sing = False
+        if action:
+            if not form.get("part", "").isdigit():
+                raise web.HTTPBadRequest(text="Экшн-видеостудия считает по частям: выберите режим «По частям».")
+            if not self.model_names:
+                await self.resolve_models()
+            # a file counts only when ComfyUI really sees it (the list of «missing» models knows only the installed sections)
+            base_of = lambda n: str(n or "").replace("/", "\\").split("\\")[-1]
+            seen_in = lambda role, cat: base_of(self.model_names.get(role)) in (getattr(self, "visible", None) or {}).get(cat, set())
+            # the base model: Singularity of the Video studio (default) when its files are there, else the action hybrid
+            sing = (form.get("amodel", "sing") != "action" and seen_in("lipsync_unet", "diffusion_models")
+                    and seen_in("text_encoder", "text_encoders") and seen_in("video_vae", "vae") and seen_in("audio_vae", "vae"))
+            if not sing:
+                await self.need_models("action")
+        draft = form.get("draft") == "1" and not test and not action   # quick draft: 4 steps, smaller frame; the finished row is made later with the same seed
         sfx = "_d" if draft else ""
         if form.get("run") and not form.get("seed"):   # one seed for the whole project: the draft and the finished version look alike
             seed = int(hashlib.md5(form["run"].encode()).hexdigest()[:12], 16)
@@ -2186,10 +2289,10 @@ class App:
             if "vocal_model" in {m["role"] for m in self.missing} or "vocal_model" not in self.model_names:
                 raise web.HTTPBadRequest(text="Для «Только вокал» нужна модель MelBand. Скачайте её в разделе «Настройки».")
             vocals = self.model_names["vocal_model"]
-        no_pika = form.get("accel") == "old" and self.config.get("engine") != "managed"   #«Без Pika»: the quality route without a speed LoRA (12 steps), for those whom Pika gives trouble
-        if not no_pika and "pika_lora" in {m["role"] for m in self.missing}:
+        no_pika = form.get("accel") == "old" and not self.locked()   #«Без Pika»: the quality route without a speed LoRA (12 steps), for those whom Pika gives trouble
+        if not action and not no_pika and "pika_lora" in {m["role"] for m in self.missing}:
             raise web.HTTPBadRequest(text="Файл Pika (pika_h3_flex_turbo_8step_hd_ref2va) не найден. Скачайте его в разделе «Настройки» или выберите «Без Pika».")
-        fin = None if no_pika else self.model_names["pika_lora"]
+        fin = None if no_pika or action else self.model_names["pika_lora"]
         width, height = wf.resolution(aspect, quality, form)
         dmad = None
         if draft:
@@ -2216,13 +2319,40 @@ class App:
                 if not src.exists():
                     raise web.HTTPBadRequest(text=f"Сначала сделайте сцену {k}: следующая продолжает её конец.")
                 try:  # the saved tail only fits a scene of the same frame size
-                    was = json.loads(src.with_suffix(".json").read_text(encoding="utf-8")).get("res")
+                    info = json.loads(src.with_suffix(".json").read_text(encoding="utf-8"))
+                    was, was_kind = info.get("res"), info.get("kind", "")
                 except (OSError, ValueError):
-                    was = None
+                    was, was_kind = None, ""
                 if was and was != f"{width}×{height}":
                     raise web.HTTPBadRequest(text=f"Сцена {k} сделана в формате {was}, а сейчас выбран {width}×{height}. "
                                                   "Верните прежний формат и качество или переделайте сцену 1 в новом.")
+                if was and was_kind != ("action" if action else ""):
+                    raise web.HTTPBadRequest(text=f"Сцена {k} сделана {'обычным' if action else 'экшн'}-путём, а сейчас выбран другой тип сцен. "
+                                                  "Верните прежний тип или переделайте сцену 1 в новом.")
                 state = await self.upload_state(src, f"h3s_long_{run}_{k - 1}.latent")
+            if action:
+                _, loras_all = await self.comfy_json("GET", "/models/loras")
+                dmad_a = next((n for n in loras_all or [] if catalog.is_action_dmad(n)), None)
+                if not dmad_a:
+                    raise web.HTTPBadRequest(text="Для экшн-видео нужен файл DMAD (minimax_h3_dmad_full_dareties_v4_step600_comfy.safetensors) в папке loras. Он описан в разделе «Экшн-видео».")
+                a_loras = [(dmad_a, lora_strength(form, "dmad", 0.8))]
+                if seen_in("speed_slider_lora", "loras"):
+                    a_loras.append((self.model_names["speed_slider_lora"], lora_strength(form, "speed", 4.0)))
+                a_loras = [x for x in a_loras if x[1] is not None] + self.custom_loras("action")
+                a_steps = 12
+                if sing and form.get("apika") == "1" and seen_in("pika_lora", "loras"):
+                    a_loras.append((self.model_names["pika_lora"], 1.0))   # the same speed LoRA as in the Video studio
+                    a_steps = 8                                             # and its 8 steps
+                # like the Video studio: one pass at full size, the continuation is kept by a noise mask (SelfLift cannot take such a mask)
+                graph, stages = wf.action_part_graph(self.model_names, scenes, k, width, height, seed, images, a_loras,
+                                                     await self.preview_opts("action") if form.get("preview") != "0" else None, state, fresh,
+                                                     False, None, True, sing, a_steps)
+                plan = wf.long_plan([sc[1] for sc in scenes], fresh=fresh)
+                return await self.queue(graph, stages, {
+                    "mode": "long", "sub": f"экшн · сцена {k + 1} из {len(scenes)}" + (f" · проба {width}×{height}" if test else ""),
+                    "prompt": scenes[k][0], "aspect": aspect, "q": quality,
+                    "len": round((plan[k]["total"] - plan[k]["ov"]) / wf.FPS, 1), "res": f"{width}×{height}", "seed": seed,
+                    "long": {"run": run, "part": k, "n": len(scenes), "draft": False, "test": test, "kind": "action"}})
             graph, stages = wf.long_part_graph(self.model_names, scenes, k, width, height, seed, images, audio, start,
                                                dmad if draft else fin, self.custom_loras("long"), "match", vocals, state,
                                                await self.preview_opts(), cont, form.get("src_project") == "1", fresh, draft)
@@ -2773,7 +2903,35 @@ class App:
         lost = sum(1 for x in items if (p := self.file_path(x)) and not p.exists())
         nocopy = sum(1 for x in items if not (x.get("local") and Path(x["local"]).exists()) and (p := self.file_path(x)) and p.exists())
         return web.json_response({"dir": str(self.results_dir()), "keep": self.keep_copies(), "lost": lost, "nocopy": nocopy,
-                                  "default": str(self.default_results_dir())})
+                                  "default": str(self.default_results_dir()),
+                                  "output": str(self.output_dir) if self.output_dir else None})
+
+    async def h_results_open(self, _req):
+        """Open the folder where ComfyUI puts the results (the one place of the files; with a copy switched on, the copy folder is next to it)."""
+        d = Path(self.output_dir) if self.output_dir else self.results_dir()
+        if not d.is_dir():
+            raise web.HTTPBadRequest(text="Папка с результатами программе не известна: откройте output вашего ComfyUI сами.")
+        try:
+            subprocess.Popen(["explorer", str(d)])
+        except Exception:
+            pass
+        return web.json_response({"ok": True, "path": str(d)})
+
+    def locked(self):
+        """«Я новичок» with the simple view: the model set is fixed. «Для новичков с опытом» (full_mode) opens own models and LoRAs on the same ComfyUI."""
+        return self.config.get("engine") == "managed" and not self.config.get("full_mode")
+
+    async def h_full_mode_set(self, req):
+        self.config.update(full_mode=bool((await req.json()).get("full")))
+        return web.json_response({"full": bool(self.config.get("full_mode"))})
+
+    async def h_window_gpu_get(self, _req):
+        return web.json_response({"software": bool(self.config.get("software_ui"))})
+
+    async def h_window_gpu_set(self, req):
+        body = await req.json()
+        self.config.update(software_ui=bool(body.get("software")))   # read by main.py at the next start
+        return await self.h_window_gpu_get(req)
 
     async def h_results_set(self, req):
         body = await req.json()
@@ -3032,8 +3190,14 @@ class App:
             await resp.write(f"data: {ag.dumps(obj)}\n\n".encode())
 
         try:
-            if self.jobs:
-                raise RuntimeError("Сейчас идёт генерация видео — агент запустится, когда она закончится.")
+            if self.jobs:   # the agent's model would compete with the video for video memory: wait for the end of the generation, then start by itself
+                waited = 0
+                while self.jobs:
+                    if req.transport is None or req.transport.is_closing():   # the user stopped the request or left
+                        return resp
+                    await send({"type": "status", "text": f"Идёт генерация видео — агент запустится сам, когда она закончится… (ждём {waited // 60}:{waited % 60:02d})"})
+                    await asyncio.sleep(3)
+                    waited += 3
             variant = await self.llm_variant()
             if not self.llm.installed(variant):
                 raise RuntimeError("Модель агента ещё не скачана.")
@@ -3053,7 +3217,7 @@ class App:
                 await send({"type": "status", "text": "У этой модели нет файла «зрения» (mmproj) — изображения она не увидит"})
             # frames cut out of a video are the last pictures of a message and are not hero pictures (Picture N)
             ctx["images"] = sum(max(0, len(m.get("images") or []) - int(m.get("frames") or 0)) for m in messages if m["role"] == "user")
-            active = self.skills.active(ag.chat_text(messages), target)
+            active = self.skills.active(ag.chat_text(messages), target, ctx.get("model"))
             if target == "actor" and not any(s["id"] == "akterskaya-igra" for s in active):
                 # this mode is acting-first: its skill is always on here
                 active += [s for s in self.skills.list() if s["id"] == "akterskaya-igra" and s["mode"] != "off"]
@@ -3262,6 +3426,10 @@ def build_app(comfy_override=None):
         web.post("/api/mode/offered", state.h_mode_offered),
         web.post("/api/setup/cancel", state.h_setup_cancel),
         web.post("/api/open-driver-page", state.h_open_driver),
+        web.post("/api/dmad/open", state.h_open_dmad),
+        web.post("/api/results/open", state.h_results_open),
+        web.post("/api/dmad/folder", state.h_dmad_folder),
+        web.post("/api/dmad/install", state.h_dmad_install),
         web.post("/api/clipboard", state.h_clipboard),
         web.post("/api/support", state.h_support),
         web.post("/api/rent/open", state.h_rent_open),
@@ -3336,6 +3504,9 @@ def build_app(comfy_override=None):
         web.delete("/api/agent/skills/{id}", state.h_skill_delete),
         web.get("/api/results", state.h_results_get),
         web.post("/api/results", state.h_results_set),
+        web.get("/api/window-gpu", state.h_window_gpu_get),
+        web.post("/api/full-mode", state.h_full_mode_set),
+        web.post("/api/window-gpu", state.h_window_gpu_set),
         web.post("/api/results/backfill", state.h_results_backfill),
         web.post("/api/results/clean", state.h_results_clean),
         web.get("/api/library", state.h_library),

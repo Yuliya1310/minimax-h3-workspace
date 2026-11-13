@@ -65,6 +65,7 @@ DEFAULT_SKILL_SETTINGS = {
     "flux2-klein": {"mode": "off", "keywords": []},
     "storyboard": {"mode": "off", "keywords": []},
     "qwen-image-2-1-director-prompt": {"mode": "off", "keywords": []},
+    "minimax-h3-image": {"mode": "off", "keywords": []},
     "akterskaya-igra": {"mode": "auto", "keywords": [
         "актер", "актёр", "диалог", "реплик", "эмоци", "игра", "драм", "ссор", "спор", "плач", "слез", "слёз",
         "прощан", "признан", "разговор", "говорит", "говорят", "кричит", "шепчет", "обид", "ревн", "страх",
@@ -74,9 +75,9 @@ DEFAULT_SKILL_SETTINGS = {
 
 # "Prompt for" targets that make pictures: which skill writes the prompt for each
 IMAGE_SKILLS = {"plist": "krea-2", "krea": "krea-2", "fluxt": "flux2-klein", "qwent": "qwen-image-2-1-director-prompt",
-                "qwen": "qwen-image-2-1-director-prompt", "sheet": "karta-personazha", "sheet6": "karta-personazha",
+                "qwen": "qwen-image-2-1-director-prompt", "h3t": "minimax-h3-image", "h3e": "minimax-h3-image", "sheet": "karta-personazha", "sheet6": "karta-personazha",
                 "story": "storyboard", "outpaint": "qwen-image-2-1-director-prompt", "inpaint": "qwen-image-2-1-director-prompt"}
-AGENT_TARGETS = ("video", "lipsync", "refs", "actor", "swap", "action", "long") + tuple(IMAGE_SKILLS)
+AGENT_TARGETS = ("video", "lipsync", "refs", "actor", "swap", "action", "actionsc", "long") + tuple(IMAGE_SKILLS)
 # long extra reference files that would not fit next to the rest into the model's context
 SKIP_REFS = {"platform-adapters.md", "long-form-writing.md"}
 
@@ -129,9 +130,12 @@ class Skills:
         all_s[sid] = cur
         self.config.update(skills=all_s)
 
-    def active(self, chat_text, target="video"):
+    def active(self, chat_text, target="video", model=None):
         if target in IMAGE_SKILLS:  # a picture prompt: only its own skill, the video skills would mislead the model
-            return [s for s in self.list() if s["id"] == IMAGE_SKILLS[target]]
+            ids = [IMAGE_SKILLS[target]]
+            if model == "h3img" and target in ("story", "sheet", "sheet6"):   # a storyboard / sheet for MiniMax H3 Image: its own writing rules too
+                ids.append("minimax-h3-image")
+            return [s for s in self.list() if s["id"] in ids]
         text = chat_text.lower()
         res = []
         for s in self.list():
@@ -285,6 +289,30 @@ def system_prompt(skills_text, target, ctx):
             "Русскую версию и настройки модели не выводи.\n"
             "- Одной строкой перед блоком подскажи формат кадра из списка 16:9, 9:16, 1:1, 4:3, 3:4, 3:2, 2:3 (выбирается в разделе).\n"
             "- Картинки, приложенные к чату, это образцы настроения и композиции, их не пересказывай подробно.")
+    elif target == "h3t":
+        mode_rules = (
+            "Режим приложения: КАРТИНКА ПО ТЕКСТУ (MiniMax H3 Image, раздел «Изображение по тексту», модель MiniMax H3 Image). Нужен "
+            "промпт для ОДНОЙ КАРТИНКИ, это не видео: без таймкодов, шотов и звука. Используй скилл «minimax-h3-image».\n"
+            "- Нужен только английский промпт одним блоком prompt, подробный, на весь кадр (80-250 слов). Негативного промпта у модели "
+            "нет, не выводи его. Русскую версию и настройки модели не выводи.\n"
+            "- Одной строкой перед блоком подскажи формат кадра из 16:9, 9:16, 1:1, 4:3, 3:4, 3:2, 2:3, 21:9 и размер (8 или "
+            "16 МП: от 8 МП картинка чистая, лучше всего 16 МП, это ~2 минуты на видеокарте 16 ГБ; 4 МП даёт зерно, только для проб).\n"
+            "- Картинки, приложенные к чату, здесь только образцы настроения: не пересказывай их подробно. Если пользователю нужно "
+            "сделать по ним (стиль, герои), одной строкой подскажи цель «MiniMax H3 Image: правка».")
+    elif target == "h3e":
+        mode_rules = (
+            f"Режим приложения: ГЕНЕРАЦИЯ И ПРАВКА ПО РЕФЕРЕНСАМ (MiniMax H3 Image, раздел «Редактирование» → «Править по описанию», "
+            f"модель MiniMax H3 Image). К чату приложено картинок: {n_img}, в приложении можно до 5. Они подаются как <Picture 1>, "
+            "<Picture 2>… в порядке слотов; первая задаёт форму результата. Используй скилл «minimax-h3-image».\n"
+            "- Для КАЖДОЙ картинки скажи её роль и что не брать (например, <Picture 1> стиль без людей и композиции, <Picture 2> и "
+            "<Picture 3> герои с сохранением лица и одежды, место словами). Пользователь тегов не пишет, расставляешь их ты. "
+            "Роли пользователь называет своими словами; если не назвал, угадай по описанию и в конце одной строкой скажи, в каком порядке "
+            "класть картинки в слоты.\n"
+            "- Если картинка одна и это правка, напиши инструкцию: что изменить и что обязательно сохранить (лицо, причёска, одежда, поза, "
+            "композиция, свет). Одна правка за раз.\n"
+            "- Ответ: один английский блок prompt, подробный. Негатив не выводи. Размеры и настройки не выводи; одной строкой подскажи "
+            "формат кадра и размер (8 или 16 МП; 4 МП даёт зерно), не больше 5 картинок.\n"
+            + ("- КАРТИНОК В ЧАТЕ НЕТ: попроси приложить их (скрепка или «Из Библиотеки»), не выдумывай." if not n_img else ""))
     elif target == "qwent":
         mode_rules = (
             "Режим приложения: КАРТИНКА ПО ТЕКСТУ (Qwen Image 2.1, раздел «Картинка по тексту», модель Qwen 2.1). Нужен промпт "
@@ -409,6 +437,54 @@ def system_prompt(skills_text, target, ctx):
             "SCENE 2 | 10\n<Picture 1> is the character reference (keep this face exactly). <Picture 2> is the location reference. "
             "The knight <Picture 1> in the ruined throne room <Picture 2> starts playing fiercely, head tilted back. "
             "Camera circles him at chest height. Flickering ghostly light on the walls.")
+    elif target == "actionsc":
+        lg = ctx.get("long") or {}
+        secs = lg.get("secs") or []
+        mode_rules = (
+            "Режим приложения: ЭКШН-ВИДЕОСТУДИЯ (бой, погоня, бег, прыжки, драка, стрельба; сцены идут одна за другой, как в Видеостудии, "
+            "но с добавками для быстрого движения). Ролик состоит из сцен, длина сцены от 3 до 15 секунд, для экшна лучше "
+            "3-5 секунд (так считается быстрее и движение чище), сцен не больше 12"
+            + (f"; сейчас в разделе {len(secs)} сцен: {', '.join(str(int(x)) for x in secs)} с" if secs else "")
+            + ". Если пользователь не назвал число сцен или общую длину, предложи сам по описанию (обычно 3-6 сцен по 3-5 с). "
+            "Если пользователь назвал общую длину («ролик на 20 секунд»), раздели её на сцены по 3-5 секунд так, чтобы сумма сошлась.\n"
+            "ГЛАВНОЕ: каждая следующая сцена продолжает прошлую, но модель видит только последнюю секунду прошлой сцены и "
+            "референс-картинки. Текст соседних сцен она НЕ видит. Поэтому:\n"
+            "- РАЗБИВКА: распиши историю по порядку и по времени, как раскадровку: в заголовке каждой сцены её длина в секундах, а в "
+            "тексте сцены, что происходит в ЭТОЙ части ролика (начало, нарастание, кульминация, развязка). Сцена N должна начинаться "
+            "с того, чем закончилась сцена N-1 (то же место, поза, направление движения), и приводить к началу сцены N+1;\n"
+            "- в КАЖДОЙ сцене коротко заново назови героя и место, ссылаясь на референс-картинки как <Picture 1>, <Picture 2> "
+            f"(приложено картинок: {n_img}, можно до 5; пользователь сам решает, что на какой)"
+            + ("; КАРТИНОК НЕТ: теги <Picture N> не используй, а в каждой сцене словами опиши героя, одежду и место одинаково" if not n_img else "")
+            + "; внешность подробно не расписывай, её даёт картинка;\n"
+            "- Роли картинок опиши во вступлении (см. ФОРМАТ ОТВЕТА), например `<Picture 1> is the character reference (keep this "
+            "face exactly). <Picture 2> is the location reference.` Теги ставишь ты, пользователь их не пишет; если роли не названы, "
+            "угадай и в конце одной строкой скажи, в каком порядке класть картинки;\n"
+            "- ЭКШН: одно главное быстрое действие на сцену (рывок, прыжок, удар, поворот, падение), нарастание от сцены к сцене. "
+            "Движение называй конкретно и с темпом: sprints, vaults, ducks, spins. Камеру пиши отдельной фразой и с темпом "
+            "(fast tracking shot beside her, low-angle whip pan, quick pull back), без резкой смены места внутри сцены;\n"
+            "- ЕДИНЫЙ МИР: в каждой сцене повторяй одни и те же слова про героя (имя, одежда, причёска), место, время суток, погоду, "
+            "свет и цвет. Меняй только действие, ракурс и крупность;\n"
+            "- смена места или плана (другая локация, крупный план вместо общего): начинай шот словами `a new plan:` сразу после "
+            "времени (`[Shot 3] At 00:06.000, a new plan: ...`). Такая сцена строится заново по референсам, качество как в первой. "
+            "Без `a new plan` оставляй только шоты, где действие идёт одним кадром, и не больше 3-4 подряд;\n"
+            "- ЗВУК: своего аудио нет, звук делает модель по тексту. В конце каждой сцены одной короткой фразой напиши звук "
+            "(шаги, дождь, крики толпы, музыка за кадром). Реплики героев, если нужны, в <d>[Язык] ...</d>, коротко, одна на 2-3 секунды.\n"
+            "ФОРМАТ ОТВЕТА: ровно ОДИН блок prompt в ПОЛНОМ формате MiniMax H3 (как в скилле «hailuo-h3»), ЦЕЛЫМ роликом: 1) "
+            "вступление про картинки: `How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns "
+            "with the 0.00-second mark of the target video.` (по одной фразе на каждую картинку); 2) `integrated_multimodal_description: "
+            "[Shot 1] ...`, затем `[Shot 2] At 00:03.000, ...`, `[Shot 3] At 00:06.000, ...` и так далее: шоты по 3-5 секунд подряд, "
+            "время каждого шота начинается там, где закончился прошлый (шот 2 с 3-й секунды, шот 3 с 6-й и т.д.), в шоте: действие, "
+            "камера, звук; 3) в конце `overall_soundscape: ...` и `non_diegetic_music: ...`. Приложение само разрежет это на сцены "
+            "по шотам (по ползункам времени) и в КАЖДУЮ сцену вставит вступление, свой шот с его номером и временем, звук и музыку. "
+            "Не дроби на SCENE, не пиши ничего вне этого формата. Пример:\n"
+            "How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the 0.00-second mark of "
+            "the target video.\n\n"
+            "integrated_multimodal_description: [Shot 1] Live-action, cinematic, tracking shot. A woman <Picture 1> in a long beige coat "
+            "sprints through a rainy neon night market, knocking over crates. Splashing water, shouting crowd.\n\n"
+            "[Shot 2] At 00:03.000, the woman <Picture 1> vaults over a market stall and keeps running into a narrow alley, a pursuer's "
+            "shadow behind her. Low fast camera following her. Rain, echoing footsteps.\n\n"
+            "overall_soundscape: Heavy rain, shouting crowd, running footsteps.\n\n"
+            "non_diegetic_music: A tense driving percussion theme.")
     elif target == "swap":
         mode_rules = (
             "Режим приложения: ЗАМЕНА ПЕРСОНАЖА (MiniMax H3 Ref2V + LoRA замены). Пользователь загружает видео (<Video 1>), в котором "
@@ -432,7 +508,7 @@ def system_prompt(skills_text, target, ctx):
             "напомни: видео - в слот видео, картинки - по порядку героев.")
     elif target in ("refs", "action"):
         mode_rules = (
-            ("Режим приложения: ЭКШН-СЦЕНЫ (Hybrid FL2VA/Ref2VA, сэмплинг 8 шагов в низком разрешении + 4 в высоком): "
+            ("Режим приложения: ЭКШН-ВИДЕО, ОДНО ВИДЕО (Hybrid FL2VA/Ref2VA, сэмплинг 8 шагов в низком разрешении + 4 в высоком): "
              "бой, погоня, бег, прыжки, стрельба. Пиши энергичное действие по нарастанию, по 1 ключевому движению на шот, "
              "быстрые, но мотивированные движения камеры (tracking, pull out, truck) с указанием скорости. "
              if target == "action" else
@@ -463,6 +539,22 @@ def system_prompt(skills_text, target, ctx):
             align = "картинок нет - T2VA, без строки выравнивания"
         mode_rules = (f"Режим приложения: ГЕНЕРАЦИЯ ВИДЕО (FastH3: текст / первый кадр / первый и последний кадр). "
                       f"Сейчас {align}. Длительность клипа {dur or 5} с - таймкоды шотов не выходят за неё.")
+    if ctx.get("model") == "h3img" and target in ("story", "sheet", "sheet6"):
+        # the user chose MiniMax H3 Image for this storyboard / character sheet: it overrides the model words in the rules above
+        mode_rules += (
+            "\n\nМОДЕЛЬ ЭТОГО ЗАПРОСА — MiniMax H3 Image (важнее любых упоминаний Krea 2, FLUX.2 и Qwen выше). Применяй скилл "
+            "«minimax-h3-image» вместе с остальными скиллами:\n"
+            "- Промпт английский, подробный, связным описанием всего кадра; негатива нет. Для раскадровки и листа структуру "
+            "(панели, кадры, сетка, без текста и подписей) бери из скилла «storyboard» / «Карта персонажа», а язык описания и "
+            "порядок слов из «minimax-h3-image».\n"
+            "- Картинки из чата называй <Picture 1>, <Picture 2>… (до 5), а НЕ <image1> и НЕ \"image 1\". Герой с картинки: \"the "
+            "character from <Picture 1>, keeping the face, hairstyle and outfit exactly\"; стиль: \"in the style of <Picture 1>\"; "
+            "локация: \"in the location from <Picture 2>\".\n"
+            "- В режимах «По кадрам» и «Одним листом» картинки из чата подгружаются как референсы (Picture N); в листе персонажа "
+            "по описанию (текст) картинки не подгружаются, поэтому опиши героя словами. Если нужен лист ПО ГОТОВОЙ картинке, "
+            "одной строкой подскажи «Правка изображения» → «Лист персонажа» → модель MiniMax H3 Image.\n"
+            "- Каждый кадр и лист рисуются крупно (около 4 МП), поэтому описывай детали, которые будут видны (одежда, материалы, "
+            "свет).")
     intro = ("Ты - агент-художник внутри приложения Minimax H3 Workspace. Пользователь описывает картинку или правку, может приложить "
              "картинки. Ты пишешь готовый промпт для модели картинок по правилам скилла ниже."
              if target in IMAGE_SKILLS else

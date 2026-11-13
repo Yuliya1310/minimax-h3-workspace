@@ -210,6 +210,15 @@ VARIANTS = {
     "qwen_vae": {
         "bf16": _m("Comfy-Org/Qwen-Image-2.1", "vae/qwen_image_2.1_vae_bf16.safetensors", 0.68, "vae", sub=IMG_SUB),
     },
+    # MiniMax H3 Image (official ComfyUI build, Comfy-Org/MiniMax-H3-Image): pictures by text and edit by reference pictures.
+    # Its text encoder is the same file as the video's «text_encoder» (qwen3vl_32b_minimax_h3_nvfp4_awq), so it is not downloaded twice.
+    "h3img_unet": {
+        "w4a8": _m("Comfy-Org/MiniMax-H3-Image", "diffusion_models/minimax_h3_image_pruned_w4a8.safetensors", 12.55, "diffusion_models"),
+        "int8": _m("Comfy-Org/MiniMax-H3-Image", "diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors", 20.98, "diffusion_models"),
+    },
+    "h3img_vae": {
+        "fp16": _m("Comfy-Org/MiniMax-H3-Image", "vae/minimax_h3_image_vae_fp16.safetensors", 1.17, "vae"),
+    },
     # FLUX.2 klein 4B (Apache 2.0, free for commercial use): edit a picture by text
     "flux_unet": {
         "fp8": _m("black-forest-labs/FLUX.2-klein-4b-fp8", "flux-2-klein-4b-fp8.safetensors", 4.07,
@@ -236,6 +245,7 @@ ROLE_MARKS = {
     "krea_vae": ["qwen_image", "qwen-image"], "kreareal_unet": ["krea"], "kreareal_lora": ["realism"],
     "qwen_unet": ["qwen"], "qwen_clip": ["qwen3vl", "qwen3-vl"], "qwen_vae": ["qwen"], "outpaint_lora": ["outpaint"],
     "flux_unet": ["flux"], "flux_clip": ["qwen_3", "qwen3"], "flux_vae": ["flux"],
+    "h3img_unet": ["h3_image", "h3-image"], "h3img_vae": ["h3_image_vae", "image_vae"],
 }
 
 
@@ -273,6 +283,7 @@ VARIANT_LABELS = {
     "lipsync_unet": {"full": "v1.3 полная (самая тяжёлая)", "pruned": "v1.3 облегчённая", "lite": "v1.3 лёгкая (слабее качество)",
                      "v2": "v2 облегчённая — по отзывам, звук лучше", "v2_full": "v2 полная"},
     "action_unet": {"int8": "обычная (int8)", "lite": "лёгкая (меньше памяти, чуть слабее)"},
+    "h3img_unet": {"w4a8": "лёгкая W4A8 (12,5 ГБ)", "int8": "обычная int8 (21 ГБ)"},
 }
 
 # LoRA from the original action workflow that has no public download; used when the user has it
@@ -282,7 +293,7 @@ ACTION_DMAD_LORA = "minimax_h3_dmad_full_dareties_v4_step600_comfy_fro"
 # (huggingface.co/silveroxides/MiniMax-H3_tests, 867 MB). Both file names are accepted, and only the plain «…_fro»
 # versions: «…_fro_fulladaln», «…_rev6_…» are other files.
 ACTION_DMAD_FILES = (ACTION_DMAD_LORA + ".safetensors", "minimax_h3_fl2v_lightx2v_v0.1_dareties_v4_step600_comfy_fro.safetensors",
-                     # the author's own page (civitai.com/models/2837571, «Minimax H3 Turbo LoRAs», version dmad_larryvrhv4_merge)
+                     # the author's own page (civitai.com/models/2837571?modelVersionId=3391964, «Minimax H3 Turbo LoRAs», version dmad_larryvrhv4_merge)
                      # publishes it without the «_fro» tail
                      "minimax_h3_dmad_full_dareties_v4_step600_comfy.safetensors")
 
@@ -300,7 +311,7 @@ ROLE_TITLES = {
     "ref2v_turbo_lora": "LoRA ускорения для Lipsync",
     "upscaler": "Апскейлер второго прохода",
     "preview": "Декодер живого превью",
-    "action_unet": "Основная модель — Экшн-сцены (Hybrid FL2VA/Ref2VA)",
+    "action_unet": "Основная модель — Экшн-видео (Hybrid FL2VA/Ref2VA)",
     "speed_slider_lora": "LoRA Speed Slider (экшн)",
     "action_upscaler": "Апскейлер SelfLift (экшн, точный режим)",
     "vocal_model": "Отделение голоса от музыки (MelBand RoFormer)",
@@ -325,10 +336,13 @@ ROLE_TITLES = {
     "flux_unet": "Основная модель — Правка изображения для коммерции (FLUX.2 klein 4B)",
     "flux_clip": "Текстовый энкодер FLUX.2 klein (Qwen3 4B)",
     "flux_vae": "VAE для FLUX.2",
+    "h3img_unet": "Основная модель — Изображения MiniMax H3 Image (по тексту и правка по референсам)",
+    "h3img_vae": "VAE для MiniMax H3 Image",
 }
 
-MODE_TITLES = {"video": "Image-to-Video", "lipsync": "Lipsync", "refs": "Референсы", "actor": "Актёрская игра", "swap": "Замена персонажа", "action": "Экшн-сцены",
+MODE_TITLES = {"video": "Image-to-Video", "lipsync": "Lipsync", "refs": "Референсы", "actor": "Актёрская игра", "swap": "Замена персонажа", "action": "Экшн-видео",
                "krea": "Изображение по тексту", "kreareal": "Изображение: реализм", "qwen": "Правка изображения", "flux": "Правка изображения: FLUX.2 (можно в коммерцию)",
+               "h3img": "Изображения MiniMax H3 Image (по тексту и по референсам)",
                "upscale": "Увеличение видео и изображений", "relayvsr": "Быстрое увеличение видео (RelayVSR)", "long": "Длинное видео"}
 
 # Which roles each mode needs.
@@ -347,6 +361,7 @@ MODE_ROLES = {
     "kreareal": ["kreareal_unet", "kreareal_lora", "krea_clip", "krea_vae"],
     "qwen": ["qwen_unet", "qwen_clip", "qwen_vae"],
     "flux": ["flux_unet", "flux_clip", "flux_vae"],
+    "h3img": ["h3img_unet", "text_encoder", "h3img_vae"],
     "upscale": ["seedvr_unet", "seedvr_vae"],
     "relayvsr": ["relayvsr_unet", "relayvsr_vae"],
 }
@@ -370,16 +385,16 @@ DEFAULT_CHOICE = {"fast_unet": "int8", "lipsync_unet": "full", "text_encoder": "
                   "realism_lora": "v1", "motion_repair_lora": "v1", "pika_lora": "hd8", "swap_lora": "v15", "sla_lora": "bf16",
                   "krea_unet": "int8", "krea_clip": "fp8", "krea_vae": "bf16", "kreareal_unet": "fp8", "kreareal_lora": "v2",
                   "qwen_unet": "int8", "qwen_clip": "int8", "qwen_vae": "bf16", "outpaint_lora": "v2",
-                  "flux_unet": "fp8", "flux_clip": "bf16", "flux_vae": "bf16",
+                  "flux_unet": "fp8", "flux_clip": "bf16", "flux_vae": "bf16", "h3img_unet": "int8", "h3img_vae": "fp16",
                   "seedvr_unet": "int8", "seedvr_vae": "fp16", "relayvsr_unet": "x2", "relayvsr_vae": "x2"}
 
 
 PROFILES = {
-    "lite": {"title": "Лёгкий", "lipsync_unet": "lite", "action_unet": "lite",
+    "lite": {"title": "Лёгкий", "lipsync_unet": "lite", "action_unet": "lite", "h3img_unet": "w4a8",
              "about": "Самые лёгкие версии: меньше качать и меньше памяти, качество немного ниже"},
-    "standard": {"title": "Стандарт", "lipsync_unet": "v2", "action_unet": "int8",
+    "standard": {"title": "Стандарт", "lipsync_unet": "v2", "action_unet": "int8", "h3img_unet": "w4a8",
                  "about": "Облегчённая (pruned) Singularity v2: ~20 ГБ вместо 34, качество почти как у полной. Подходит для видеокарт 12–16 ГБ"},
-    "max": {"title": "Максимум", "lipsync_unet": "full", "action_unet": "int8",
+    "max": {"title": "Максимум", "lipsync_unet": "full", "action_unet": "int8", "h3img_unet": "int8",
             "about": "Полные модели, как в исходных workflow"},
 }
 
@@ -413,7 +428,7 @@ def choose_models(hw, profile=None):
     blackwell = (hw.get("compute_cap") or 0) >= 12
     profile = profile if profile in PROFILES else recommended_profile(hw)
     choice = dict(DEFAULT_CHOICE, lipsync_unet=PROFILES[profile]["lipsync_unet"],
-                  action_unet=PROFILES[profile]["action_unet"])
+                  action_unet=PROFILES[profile]["action_unet"], h3img_unet=PROFILES[profile].get("h3img_unet", "int8"))
     notes = []
 
     if blackwell and vram >= 16:
@@ -453,13 +468,13 @@ def model_entry(role, variant):
 
 
 # modes that appeared after the first release: the app offers them once after an update
-OFFER_MODES = ["flux", "long"]
+OFFER_MODES = ["flux", "long", "h3img"]
 
 
 # ---- own model files: does the file fit the rest of the mode (the speed-up LoRAs are made for ONE family of video models) ----
 MAIN_ROLE = {"video": "fast_unet", "lipsync": "lipsync_unet", "refs": "lipsync_unet", "actor": "lipsync_unet", "swap": "lipsync_unet",
              "long": "lipsync_unet", "action": "action_unet", "krea": "krea_unet", "qwen": "qwen_unet", "flux": "flux_unet",
-             "upscale": "seedvr_unet"}
+             "h3img": "h3img_unet", "upscale": "seedvr_unet"}
 ROLE_FAMILY = {"lipsync_unet": "ref2", "fast_unet": "fast", "action_unet": "hybrid",
                "ref2v_turbo_lora": "ref2", "pika_lora": "ref2", "swap_lora": "ref2", "sla_lora": "fast", "speed_slider_lora": "hybrid"}
 FAMILY_TITLE = {"ref2": "Ref2V / Singularity (референсы, Lipsync, студия)", "fast": "FastH3 (Image-to-Video)", "hybrid": "Hybrid FL2VA/Ref2VA (экшн)"}

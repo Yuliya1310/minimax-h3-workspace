@@ -4,6 +4,7 @@ Falls back to the default browser if the WebView2 window cannot be created.
 """
 
 import asyncio
+import json
 import os
 import socket
 import sys
@@ -189,6 +190,11 @@ def main():
                 pass
         try:
             webview.settings["ALLOW_DOWNLOADS"] = True  # a plain <a download> also works as a fallback
+        except Exception:
+            pass
+        try:   # «Окно без видеокарты» (Настройки): for computers where the window takes GBs of video memory
+            if json.loads((server.DATA_DIR / "config.json").read_text(encoding="utf-8")).get("software_ui"):
+                os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--disable-gpu --disable-gpu-compositing"
         except Exception:
             pass
         api = JsApi(port)
