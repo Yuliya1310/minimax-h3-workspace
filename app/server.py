@@ -1315,6 +1315,51 @@ class App:
         # The engine is stopped only when a new installation really starts (h_setup_install).
         return web.json_response({"ok": True})
 
+    async def h_comfy_update(self, _req):
+        """«Обновить ComfyUI»: runs the portable build's own update_comfyui.bat (the plain one: NOT _stable and NOT
+        _and_python_dependencies, which can swap PyTorch for a CPU build and leave ComfyUI unable to start)."""
+        if self.config.get("engine") != "managed":
+            return web.json_response({"error": "Обновление ComfyUI из программы работает только для встроенного ComfyUI."}, status=400)
+        if self.installer or getattr(self, "comfy_updating", False):
+            return web.json_response({"error": "Сейчас идёт установка или обновление. Дождитесь конца."}, status=409)
+        root = self.comfy_root()
+        bat = root / "update" / "update_comfyui.bat"
+        if not bat.exists():
+            return web.json_response({"error": "Не найден файл update\\update_comfyui.bat во встроенном ComfyUI."}, status=404)
+        self.comfy_updating = True
+        try:
+            before = None
+            try:
+                before = (await self.system_stats())["system"].get("comfyui_version")
+            except Exception:
+                pass
+            if self.process:
+                await asyncio.to_thread(self.process.stop)
+
+            def run():
+                # an argument makes the .bat skip its final «pause» (otherwise it would wait for a key press forever)
+                p = subprocess.run(["cmd", "/c", "update_comfyui.bat", "nopause"], cwd=bat.parent, capture_output=True,
+                                   timeout=1200, creationflags=engine.CREATE_NO_WINDOW, env=engine.local_env(root))
+                return p.returncode, (p.stdout or b"").decode("cp866", "replace") + (p.stderr or b"").decode("cp866", "replace")
+            try:
+                code, out = await asyncio.to_thread(run)
+            except Exception as e:
+                code, out = -1, f"{type(e).__name__}: {e}"
+            self.start_managed()
+            try:
+                await self.wait_comfy()
+            except Exception as e:
+                return web.json_response({"error": "Обновление выполнено, но ComfyUI не запустился после него.\n" + str(e),
+                                          "log": out[-1500:]}, status=500)
+            after = None
+            try:
+                after = (await self.system_stats())["system"].get("comfyui_version")
+            except Exception:
+                pass
+            return web.json_response({"ok": code == 0, "before": before, "after": after, "log": out[-1500:]})
+        finally:
+            self.comfy_updating = False
+
     # ---------- cloud (RunningHub) ----------
 
     def rh(self):
@@ -3425,6 +3470,7 @@ def build_app(comfy_override=None):
         web.post("/api/settings/mirror", state.h_mirror),
         web.post("/api/mode/offered", state.h_mode_offered),
         web.post("/api/setup/cancel", state.h_setup_cancel),
+        web.post("/api/comfy/update", state.h_comfy_update),
         web.post("/api/open-driver-page", state.h_open_driver),
         web.post("/api/dmad/open", state.h_open_dmad),
         web.post("/api/results/open", state.h_results_open),

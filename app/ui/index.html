@@ -134,6 +134,10 @@
 #welcome .wl-card{border:2px solid var(--line-2);border-radius:18px;padding:26px 26px 22px;background:var(--surface,rgba(255,255,255,.03));display:flex;flex-direction:column;gap:12px}
 #welcome .wl-card.main{border-color:var(--accent,#3ed1b9);box-shadow:0 0 0 3px rgba(62,209,185,.15)}
 #welcome .wl-card h2{margin:0;font-size:26px}#welcome .wl-card p{margin:0;font-size:16px;line-height:1.5;color:var(--muted)}
+#welcome .wl-dir{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:14px;color:var(--muted);word-break:break-all}#welcome .wl-dirhint{font-size:12.5px;color:var(--dim)}
+.ag-h .ag-chk{width:18px;height:18px;border-radius:5px;border:2px solid var(--line-2);display:grid;place-items:center;font-size:12px;flex:none;color:#fff}
+.ag-h.sel .ag-chk{background:var(--accent);border-color:var(--accent)}.ag-h.sel{background:var(--accent-soft)}
+#agSelBar{display:flex;flex-direction:column;gap:6px}#agSelBar[hidden],#agClear[hidden]{display:none}
 #welcome .wl-card ul{margin:0;padding-left:20px;font-size:15.5px;line-height:1.6}
 #welcome .wl-go{margin-top:auto;font-size:19px;font-weight:800;padding:16px 20px;border-radius:14px;cursor:pointer;border:0}
 #welcome .wl-card.main .wl-go{background:var(--accent,#3ed1b9);color:#06231e}#welcome .wl-card:not(.main) .wl-go{background:var(--surface-2,rgba(255,255,255,.08));color:var(--text,#fff)}
@@ -1280,7 +1284,12 @@ img.pr-media{object-position:center 38%}
         <div class="card ag-hist">
           <button class="btn pri" id="agNew2" style="width:100%">＋ Новый чат</button>
           <div class="ag-hlist" id="agHist"></div>
-          <button class="btn" id="agClear" style="width:100%" title="Удалить сразу все чаты (переписки) с агентом. Один чат удаляется крестиком справа от него">Удалить все чаты</button>
+          <button class="btn" id="agClear" style="width:100%" title="Выбрать, какие чаты (переписки) с агентом удалить. Один чат удаляется крестиком справа от него">Удалить чаты</button>
+          <div id="agSelBar" hidden>
+            <div style="display:flex;gap:6px"><button class="btn mini" id="agSelAll" style="flex:1">Выбрать все</button><button class="btn mini" id="agSelDone" style="flex:1">Готово</button></div>
+            <button class="btn" id="agDelSel" style="width:100%" disabled>Удалить выбранные (0)</button>
+            <button class="btn" id="agDelAll" style="width:100%">Удалить все</button>
+          </div>
         </div>
         <div class="card ag-chat">
           <div class="ag-msgs" id="agMsgs">
@@ -1646,6 +1655,10 @@ img.pr-media{object-position:center 38%}
         <div class="card" style="margin-bottom:16px">
           <div class="card-h"><h3>Движок</h3><button class="btn" id="mdReset">Изменить настройки</button></div>
           <div class="kv" id="mdEngine"></div>
+          <div id="mdCmUpd" hidden style="margin-top:12px">
+            <div class="hint" id="mdCmUpdT"></div>
+            <button class="btn" id="mdCmUpdGo" type="button" style="margin-top:8px" title="Запускает обновление встроенного ComfyUI (безопасный файл update_comfyui.bat), потом снова запускает ComfyUI">Обновить ComfyUI</button>
+          </div>
         </div>
         <div class="card" id="mdRentCard">
           <div class="card-h"><h3>Аренда мощного компьютера</h3></div>
@@ -3285,11 +3298,25 @@ function renderModels(s) {
   $('#mdEngine').innerHTML = s.engine === 'managed'
     ? `<span>Режим</span><b>встроенный ComfyUI ${s.comfy_version || ''}</b><span>Папка</span><b>${esc(setupInfo?.config?.install_dir || '')}</b><span>Видео</span><b>${esc(s.output_dir || '')}</b>`
     : `<span>Режим</span><b>ваш ComfyUI ${s.comfy_version || ''}</b><span>Видео</span><b>${esc(s.output_dir || 'папка output вашего ComfyUI')}</b>`;
+  const cv = String(s.comfy_version || '').match(/(\d+)\.(\d+)\.(\d+)/);
+  const oldC = cv ? (+cv[1] === 0 && +cv[2] < 45) : false;
+  $('#mdCmUpd').hidden = s.engine !== 'managed';
+  $('#mdCmUpdT').innerHTML = oldC ? `<b style="color:#ff6b70">Ваш ComfyUI устарел (${esc(s.comfy_version)}).</b> Для новых моделей (например MiniMax H3 Image) нужна версия 0.45.0 или новее. Нажмите кнопку ниже: программа обновит ComfyUI сама.`
+    : 'Если новая функция пишет «Node … not found» или «custom node may not be installed», обновите ComfyUI. Не запускайте файлы из папки update вручную: кнопка делает это безопасно.';
   const P = s.paths || {};
   $('#mdEngine').insertAdjacentHTML('beforeend', (P.models ? `<span>Модели</span><b>${esc(P.models)}</b>` : '')
     + (P.assistant ? `<span>Помощник (агент)</span><b>${esc(P.assistant)}</b>` : '')
     + `<span>Настройки и список Библиотеки</span><b>${esc(P.data || '')} (мало места)</b>`);
 }
+$('#mdCmUpdGo').onclick = () => confirmBox('Обновить ComfyUI?', 'Программа остановит ComfyUI, обновит его и запустит снова. Это займёт несколько минут, нужен интернет. Дождитесь окончания генераций, прежде чем нажимать. Ваши модели и файлы не затрагиваются.', 'Обновить', async () => {
+  const b = $('#mdCmUpdGo'); b.disabled = true; b.textContent = 'Обновляю… не закрывайте программу';
+  try {
+    const r = await fetch('/api/comfy/update', { method: 'POST' }), j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'Не удалось обновить ComfyUI');
+    toast(j.ok ? `ComfyUI обновлён: ${j.before || '?'} → ${j.after || '?'}` : 'Обновление завершилось с ошибкой. Откройте «Отчёт для разработчика» и отправьте автору.');
+  } catch (e) { toast(e.message); }
+  b.disabled = false; b.textContent = 'Обновить ComfyUI'; loadStatus();
+});
 $('#mdMirror').onchange = async e => {
   try { await postJSON('/api/settings/mirror', { on: e.target.checked }); toast(e.target.checked ? 'Скачивание через зеркало hf-mirror.com включено' : 'Зеркало выключено, скачиваем с Hugging Face'); loadStatus(); } catch (err) { toast(err.message); }
 };
@@ -3448,7 +3475,8 @@ async function showWelcome() {
   w.innerHTML = '<div class="wl-in"><h1>Добро пожаловать в Minimax H3 Workspace</h1><p class="wl-sub">Выберите, как вам удобнее. Это делается один раз.</p><div class="wl-hw">Проверяю ваш компьютер…</div></div>';
   const inn = $('.wl-in', w);
   const infos = [];
-  try { for (const set of WL_SETS) infos.push(await (await fetch('/api/setup/info?modes=' + set.join(','))).json()); } catch { /* shown below */ }
+  const curDir = $('#instDir').value.trim();   // set when the folder was changed on this screen
+  try { for (const set of WL_SETS) infos.push(await (await fetch('/api/setup/info?modes=' + set.join(',') + (curDir ? '&install_dir=' + encodeURIComponent(curDir) : ''))).json()); } catch { /* shown below */ }
   if (!infos.length) { inn.insertAdjacentHTML('beforeend', '<p>Не удалось проверить компьютер. Закройте программу и откройте её снова.</p>'); return; }
   const base = infos[0], hw = base.hardware, free = hw.disk_free_gb, rec = base.recommended, title = base.profiles[rec].title;
   const pick = infos.findIndex(i => free == null || i.need_gb + 8 <= free);   // 8 GB of room for temporary files
@@ -3462,7 +3490,9 @@ async function showWelcome() {
   inn.insertAdjacentHTML('beforeend', `<div class="wl-cards">
     <div class="wl-card main"><h2>Я новичок</h2><p><b>Лёгкая установка: ничего выбирать и вводить не нужно.</b> Программа сделает всё сама, вам остаётся нажать одну кнопку и подождать.</p>
       <ul><li>Поставит ComfyUI и всё нужное</li><li>Подберёт модели под вашу видеокарту (${esc(title)})</li><li>Поставит разделы: ${set.map(m => names[m]).join('; ')}</li><li>Скачается около <b>${info.need_gb} ГБ</b>, это от получаса до нескольких часов, в зависимости от интернета</li><li>Остальное (экшн, правка изображений, MiniMax H3 Image и другое) можно добавить потом в «Настройках» одной кнопкой</li></ul>
-      ${tight ? `<p style="color:#ff6b70"><b>На диске свободно ${free} ГБ: может не хватить места.</b> Освободите место или выберите другой диск в мастере.</p>` : ''}
+      <div class="wl-dir"><span>Папка установки: <b>${esc(curDir || base.install_dir || '')}</b>${free != null ? ` (свободно ${free} ГБ)` : ''}</span><button class="btn mini wl-dirbtn" type="button">Изменить папку</button></div>
+      <small class="wl-dirhint">Лучше выбрать диск SSD: на обычном жёстком диске модели грузятся очень медленно.</small>
+      ${tight ? `<p style="color:#ff6b70"><b>На диске свободно ${free} ГБ: может не хватить места.</b> Освободите место или нажмите «Изменить папку» и выберите другой диск.</p>` : ''}
       <button class="wl-go wl-new" type="button" ${noGpu ? 'disabled' : ''}>Установить всё автоматически</button></div>
     <div class="wl-card"><h2>У меня уже есть ComfyUI</h2><p><b>Для тех, кто работает в ComfyUI и хочет все настройки.</b> Подключимся к вашему ComfyUI (на этом компьютере или арендованному), ничего не скачивая и не ставя.</p>
       <ul><li>Модели берутся из вашего ComfyUI</li><li>Можно выбирать свои модели и LoRA</li><li>Доступны «Свои workflow»</li></ul>
@@ -3473,6 +3503,11 @@ async function showWelcome() {
     const b = $('.wl-new', w); b.disabled = true; b.textContent = 'Запускаю…';
     setupModes = set.slice(); setupProfile = rec;
     try { await start('new'); $('#wzStart').click(); } catch (e) { w.hidden = false; b.disabled = false; b.textContent = 'Установить всё автоматически'; toast(e.message); }
+  };
+  $('.wl-dirbtn', w).onclick = async () => {
+    if (!window.pywebview?.api?.pick_folder) { toast('Не удалось открыть выбор папки'); return; }
+    const p = await window.pywebview.api.pick_folder(curDir || base.install_dir || '');
+    if (p) { $('#instDir').value = p; showWelcome(); }
   };
   $('.wl-own', w).onclick = () => start('external');
   $('.wl-cloud', w).onclick = () => start('cloud');
@@ -5372,10 +5407,27 @@ function fmtShort(iso) { return iso ? fmtDate(new Date(iso)) : ''; }
 async function loadChats() {
   if (!API) return;
   const list = await (await fetch('/api/agent/chats')).json();
-  $('#agHist').innerHTML = list.length ? list.map(c => `<div class="ag-h${c.id === AG.id ? ' on' : ''}" data-id="${c.id}">
+  AG_CHATS = list.map(c => c.id);
+  agSel.forEach(id => { if (!AG_CHATS.includes(id)) agSel.delete(id); });
+  $('#agHist').innerHTML = list.length ? list.map(c => `<div class="ag-h${c.id === AG.id && !agSelecting ? ' on' : ''}${agSel.has(c.id) ? ' sel' : ''}" data-id="${c.id}">
+      ${agSelecting ? `<span class="ag-chk">${agSel.has(c.id) ? '✓' : ''}</span>` : ''}
       <div><b title="${esc(c.title)}">${esc(c.title)}</b><small>${fmtShort(c.updated)}</small></div>
-      <button title="Удалить чат">✕</button></div>`).join('')
+      ${agSelecting ? '' : '<button title="Удалить чат">✕</button>'}</div>`).join('')
     : '<div class="ag-hempty">Здесь будут ваши переписки с агентом</div>';
+  agSelUi();
+}
+// selecting chats to delete (like in the Library)
+let agSelecting = false, AG_CHATS = [];
+const agSel = new Set();
+function agSelUi() {
+  $('#agClear').hidden = agSelecting; $('#agSelBar').hidden = !agSelecting;
+  $('#agDelSel').disabled = !agSel.size; $('#agDelSel').textContent = `Удалить выбранные (${agSel.size})`;
+  $('#agSelAll').textContent = AG_CHATS.length && AG_CHATS.every(id => agSel.has(id)) ? 'Снять выбор' : 'Выбрать все';
+}
+function agSelMode(on) { agSelecting = on; agSel.clear(); loadChats(); }
+async function agDeleteMany(ids) {
+  for (const id of ids) await fetch(`/api/agent/chats/${id}`, { method: 'DELETE' });
+  if (ids.includes(AG.id)) newChat(); else loadChats();
 }
 function newChat() {
   if (AG.busy) AG.ctrl?.abort();
@@ -5395,6 +5447,7 @@ function confirmBox(title, text, ok, fn) {
 }
 $('#agHist').addEventListener('click', e => {
   const row = e.target.closest('.ag-h'); if (!row) return;
+  if (agSelecting) { const id = row.dataset.id; agSel.has(id) ? agSel.delete(id) : agSel.add(id); row.classList.toggle('sel', agSel.has(id)); $('.ag-chk', row).textContent = agSel.has(id) ? '✓' : ''; agSelUi(); return; }
   if (e.target.closest('button')) {
     confirmBox('Удалить чат?', `«${$('b', row).textContent}» будет удалён без возможности восстановления.`, 'Удалить', async () => {
       await fetch(`/api/agent/chats/${row.dataset.id}`, { method: 'DELETE' });
@@ -5405,8 +5458,13 @@ $('#agHist').addEventListener('click', e => {
   }
   openChat(row.dataset.id);
 });
-$('#agClear').onclick = () => confirmBox('Удалить все чаты?', 'Все переписки с агентом будут удалены без возможности восстановления.', 'Удалить все', async () => {
-  await fetch('/api/agent/chats', { method: 'DELETE' }); newChat(); toast('Все чаты удалены');
+$('#agClear').onclick = () => { if (AG_CHATS.length) agSelMode(true); else toast('Чатов пока нет'); };
+$('#agSelDone').onclick = () => agSelMode(false);
+$('#agSelAll').onclick = () => { const all = AG_CHATS.every(id => agSel.has(id)); AG_CHATS.forEach(id => all ? agSel.delete(id) : agSel.add(id)); loadChats(); };
+$('#agDelSel').onclick = () => { const ids = [...agSel]; if (!ids.length) return;
+  confirmBox(`Удалить выбранные чаты (${ids.length})?`, 'Они будут удалены без возможности восстановления.', 'Удалить', async () => { await agDeleteMany(ids); agSelMode(false); toast('Выбранные чаты удалены'); }); };
+$('#agDelAll').onclick = () => confirmBox('Удалить все чаты?', 'Все переписки с агентом будут удалены без возможности восстановления.', 'Удалить все', async () => {
+  await fetch('/api/agent/chats', { method: 'DELETE' }); agSelMode(false); newChat(); toast('Все чаты удалены');
 });
 $('#agNew').onclick = newChat;
 $('#agNew2').onclick = newChat;
@@ -6614,6 +6672,9 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
     $('.kr-stylerow', root).hidden = S.engine !== 'krea'; $('.kr-neg', root).hidden = S.engine !== 'qwen';
     $('.kr-h3mp', root).hidden = S.engine !== 'h3img'; $$('[data-mp]', root).forEach(b => b.classList.toggle('on', b.dataset.mp === S.mp));
     $('.mode-pill span', root).textContent = { krea: 'Krea 2 · 1 МП', flux: 'FLUX.2 klein · 1 МП', qwen: 'Qwen Image 2.1 · 1 МП', h3img: `MiniMax H3 Image · ${S.mp} МП` }[S.engine];
+    const pick = $('.mdl-pick', root.closest('.view') || root);   // the «Модель / Выбрать свою…» row follows the chosen model
+    const pr = { krea: 'krea_unet', flux: 'flux_unet', qwen: 'qwen_unet', h3img: 'h3img_unet' }[S.engine];
+    if (pick && pr && pick.dataset.role !== pr) { pick.dataset.role = pr; pick.dataset.mode = S.engine; $('.pm', pick) && ($('.pm', pick).hidden = true); window.mdlRefreshAll?.(); }
   };
   async function krEngCheck() {
     const hint = $('.kr-enghint', root); hint.hidden = true;
