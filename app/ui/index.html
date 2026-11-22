@@ -12369,6 +12369,22 @@ function rmSimple(host, o) {
     finally { busy = false; }
   });
 })();
+
+// Ctrl+V with a picture in the clipboard: it goes into the first empty image field of the open page
+// (in the Agent, into the chat attachments) as if it had been picked from the disk.
+document.addEventListener('paste', e => {
+  const pics = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+  const view = $('.view.active'), agent = view?.id === 'view-agent';
+  // text copied together with the picture (Word, a web page) into a text field: the text wins, except in the Agent
+  if (!pics.length || !agent && e.clipboardData.types.includes('text/plain') && document.activeElement?.matches('textarea, input:not([type=file])')) return;
+  const inp = agent ? $('#agFile') : $$('input[type=file][accept*="image"]', view).find(i => {
+    const box = i.closest('label') || i.parentElement;
+    return box.getClientRects().length && (i.multiple || !box.matches('.filled, .on'));
+  });
+  if (!inp) return toast('На этой странице нет свободного поля для изображения');
+  const dt = new DataTransfer(); (inp.multiple ? pics : pics.slice(0, 1)).forEach(f => dt.items.add(f));
+  inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
+});
 </script>
 </body>
 </html>
