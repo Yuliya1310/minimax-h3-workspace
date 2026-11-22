@@ -18,7 +18,43 @@ import aiohttp
 import engine
 
 LLAMA_BUILD = "b11985"
-LLAMA_URL = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}/llama-{LLAMA_BUILD}-bin-win-vulkan-x64.zip"
+_LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BUILD}"
+# Какую сборку движка качать. Сборка только с Vulkan молча уходит на процессор там,
+# где у загрузчика Vulkan нет зарегистрированного драйвера (на чистой машине с RTX 4090
+# вышло ~6 ток/с вместо ~105), поэтому на NVIDIA сначала берём сборку CUDA и проверяем,
+# что движок видит карту.
+LLAMA_BACKENDS = {
+    "cuda": {"title": "CUDA", "zip": f"llama-{LLAMA_BUILD}-bin-win-cuda-12.4-x64.zip", "zip_size": 279.8e6,
+             "runtime": f"cudart-llama-bin-win-cuda-12.4-x64.zip", "runtime_size": 391.4e6},
+    "vulkan": {"title": "Vulkan", "zip": f"llama-{LLAMA_BUILD}-bin-win-vulkan-x64.zip", "zip_size": 37.3e6,
+               "runtime": None, "runtime_size": 0},
+    "cpu": {"title": "процессор", "zip": f"llama-{LLAMA_BUILD}-bin-win-cpu-x64.zip", "zip_size": 24.4e6,
+            "runtime": None, "runtime_size": 0},
+}
+BACKEND_FILE = "llama-backend.json"
+
+
+def backend_plan(hw):
+    """Сборки движка для этой машины, от лучшей к худшей. Последняя работает всегда."""
+    return ["cuda", "vulkan", "cpu"] if (hw or {}).get("nvidia") else ["vulkan", "cpu"]
+
+
+def list_devices(exe):
+    """Карты, которые движок реально видит ('CUDA0: ...'); пусто — будет считать на процессоре."""
+    if not exe:
+        return []
+    try:
+        out = subprocess.run([str(exe), "--list-devices"], capture_output=True, text=True, timeout=120,
+                             creationflags=engine.CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    text = (out.stdout or "") + (out.stderr or "")
+    lines = [ln.strip() for ln in text.splitlines()]
+    try:  # список карт идёт под этим заголовком; в болтовне загрузчика выше тоже есть двоеточия
+        start = next(i for i, ln in enumerate(lines) if ln.lower().startswith("available devices"))
+    except StopIteration:
+        return []
+    return [ln for ln in lines[start + 1:] if re.match(r"^[A-Za-z]+\d*:", ln)]
 
 HF = "https://huggingface.co/{repo}/resolve/main/{path}"
 LLM_VARIANTS = {
@@ -860,11 +896,61 @@ class LlamaServer:
         self.port = None
         self.variant = None
         self.custom = None  # {"model": path, "mmproj": path|None} when the user points to their own GGUF
+        self.info = self._load_info()
 
     def exe(self):
         hits = list((self.root / "llama.cpp").rglob("llama-server.exe")) if (self.root / "llama.cpp").exists() else []
         return hits[0] if hits else None
 
+    def _load_info(self):
+        """Какая сборка движка стоит и какие карты она видела (пишется при установке)."""
+        try:
+            return json.loads((self.root / BACKEND_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def backend(self):
+        """Какая сборка стоит и что она видит; сборку, положенную руками, проверяем один раз."""
+        if not self.info and self.exe():
+            devices = list_devices(self.exe())
+            if any(d.startswith("CUDA") for d in devices):
+                title = "CUDA"
+            elif any(d.startswith("Vulkan") for d in devices):
+                title = "Vulkan"
+            else:
+                title = "только процессор"
+            self.info = {"backend": "custom", "title": title, "devices": devices}
+        return self.info
+
+    def devices(self):
+        return list_devices(self.exe())
+
+    def placement(self):
+        """{'layers', 'total', 'where'} из лога движка — сколько модели реально легло на видеокарту."""
+        try:
+            st = self.log_path.stat()
+        except OSError:
+            return None
+        key = (st.st_mtime_ns, st.st_size)
+        if getattr(self, "_place_key", None) == key:
+            return self._place_val
+        hits = []
+        for start in (0, max(0, st.st_size - 262144)):  # строка загрузки в начале, хвост страхует поздние записи
+            try:
+                with open(self.log_path, "rb") as f:
+                    f.seek(start)
+                    text = f.read(262144).decode("utf-8", "replace")
+            except OSError:
+                break
+            hits = re.findall(r"offloaded (\d+)/(\d+) layers to (GPU|CPU)", text)
+            if hits:
+                break
+        val = None
+        if hits:
+            n, total, where = hits[-1]
+            val = {"layers": int(n), "total": int(total), "where": where}
+        self._place_key, self._place_val = key, val
+        return val
     def model_paths(self, variant):
         if self.custom:
             return Path(self.custom["model"]), Path(self.custom["mmproj"]) if self.custom.get("mmproj") else None
@@ -924,16 +1010,54 @@ class LlamaServer:
             return ""
 
 
-async def install(installer, root, variant, runtime_only=False, whisper_dir=None):
-    """Download llama.cpp (Vulkan build, works on any NVIDIA/AMD card) and, unless the user has their own, Gemma."""
+def _engine_exe(llama_dir):
+    hits = list(Path(llama_dir).rglob("llama-server.exe"))
+    return hits[0] if hits else None
+
+
+async def _fetch_engine(installer, root, llama_dir, backend):
+    """Распаковать одну сборку движка в llama_dir; сборке CUDA рядом нужны cuBLAS/cuDART."""
+    spec = LLAMA_BACKENDS[backend]
+    downloads = Path(root) / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    zpath = downloads / spec["zip"]
+    await installer.download(f'{_LLAMA_BASE}/{spec["zip"]}', zpath, "agent",
+                             f'движок llama.cpp ({spec["title"]})', spec["zip_size"])
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(llama_dir)
+    zpath.unlink(missing_ok=True)
+    if spec["runtime"]:
+        rpath = downloads / spec["runtime"]
+        await installer.download(f'{_LLAMA_BASE}/{spec["runtime"]}', rpath, "agent",
+                                 f'библиотеки {spec["title"]}', spec["runtime_size"])
+        with zipfile.ZipFile(rpath) as z:
+            z.extractall(llama_dir)
+        rpath.unlink(missing_ok=True)
+    return spec
+
+
+async def _install_engine(installer, root, llama_dir, hw):
+    """Пробовать сборки по порядку и оставить первую, которая реально видит карту; CPU-сборка — крайний случай."""
+    plan = backend_plan(hw)
+    for backend in plan:
+        spec = await _fetch_engine(installer, root, llama_dir, backend)
+        devices = list_devices(_engine_exe(llama_dir))
+        if devices or backend == plan[-1]:
+            (Path(root) / BACKEND_FILE).write_text(json.dumps(
+                {"backend": backend, "title": spec["title"], "build": LLAMA_BUILD, "devices": devices},
+                ensure_ascii=False, indent=1), encoding="utf-8")
+            return
+        await installer.step("agent", "progress",
+                             label=f'Движок {spec["title"]} не видит видеокарту — пробуем следующий…')
+        shutil.rmtree(llama_dir, ignore_errors=True)
+
+
+async def install(installer, root, variant, runtime_only=False, whisper_dir=None, hw=None):
+    """Скачать llama.cpp (сборку под эту видеокарту) и, если своя модель не указана, саму модель."""
     root = Path(root)
     llama_dir = root / "llama.cpp"
     if not (llama_dir.exists() and list(llama_dir.rglob("llama-server.exe"))):
-        zpath = root / "downloads" / f"llama-{LLAMA_BUILD}.zip"
-        await installer.download(LLAMA_URL, zpath, "agent", "llama.cpp", 37e6)
-        with zipfile.ZipFile(zpath) as z:
-            z.extractall(llama_dir)
-        zpath.unlink(missing_ok=True)
+        await _install_engine(installer, root, llama_dir, hw)
     import speech
     await speech.install(installer, root, whisper_dir)  # words from audio + voice input (~200 MB)
     if runtime_only:

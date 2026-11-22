@@ -247,6 +247,16 @@ class Installer:
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_name(dest.name + ".part")
+        if size_hint:  # сказать сразу, а не через час: хватит ли места на остаток?
+            have = part.stat().st_size if part.exists() else 0
+            need = max(0, size_hint - have)
+            try:
+                free = shutil.disk_usage(str(dest.parent)).free
+            except OSError:
+                free = None
+            if free is not None and free < need * 1.02:
+                raise RuntimeError(f"Мало места для «{label}»: нужно ещё {need / 1e9:.1f} ГБ, "
+                                   f"а свободно {free / 1e9:.1f} ГБ. Освободите место и повторите.")
         for attempt in range(attempts):  # a long outage: wait and continue from the saved .part file
             have = part.stat().st_size if part.exists() else 0
             headers = {"Range": f"bytes={have}-"} if have else {}
@@ -278,6 +288,12 @@ class Installer:
                 why = (str(e) or type(e).__name__)[:90]
                 await self.step(sid, "progress", label=f"{label} — обрыв связи ({why}), пробуем снова…")
                 await asyncio.sleep(min(30, 3 + attempt * 3))
+        got = part.stat().st_size if part.exists() else 0
+        if size_hint and got < size_hint * 0.98:
+            # недокачанный файл не должен стать «готовой» моделью: ложный 416 делает именно это
+            part.unlink(missing_ok=True)
+            raise RuntimeError(f"«{label}»: файл пришёл не целиком ({got / 1e9:.1f} из {size_hint / 1e9:.1f} ГБ). "
+                               "Повторите скачивание — оно начнётся заново.")
         part.replace(dest)
 
     async def install_comfy(self, install_dir):

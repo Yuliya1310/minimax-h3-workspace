@@ -45,6 +45,7 @@ import rhstudio
 import speech
 import updater
 import voicelab
+import watchdog
 from version import APP_VERSION
 
 
@@ -172,7 +173,10 @@ class App:
         self.comfy_override = comfy_override.rstrip("/") if comfy_override else None
         self.session = None
         self.browsers = set()
-        self.saved_queue = self.load_queue()  # unfinished jobs of the previous run (asked about at start)
+        self.saved_queue = self.load_queue()
+        # ComfyUI шлёт события по шагам тому client_id, с которым задание отправляли.
+        self.client_id = next((j['client_id'] for j in self.saved_queue if j.get('client_id')), CLIENT_ID)
+        self.recovery_lock = asyncio.Lock()
         self.jobs = JobStore(self.save_queue)  # prompt_id -> job dict
         self.library = Library(LIBRARY_FILE)
         self.refmodes = refmodes.Store(REFMODES_FILE, REFMODES_DIR)
@@ -427,7 +431,7 @@ class App:
             if not self.config.get("setup_done") and not self.comfy_override:
                 await asyncio.sleep(2)
                 continue
-            ws_url = self.comfy.replace("http", "ws", 1) + f"/ws?clientId={CLIENT_ID}"
+            ws_url = self.comfy.replace("http", "ws", 1) + f"/ws?clientId={self.client_id}"
             try:
                 async with self.session.ws_connect(ws_url, max_msg_size=0, heartbeat=20) as ws:
                     self.comfy_online = True
@@ -538,7 +542,17 @@ class App:
 
     async def finish_job(self, job):
         pid = job["prompt_id"]
-        self.jobs.pop(pid, None)
+        if self.jobs.get(pid) is not job or job.get('_finishing'):
+            return
+        job['_finishing'] = True
+        try:
+            await self._finish_tracked(job)
+            self.jobs.pop(pid, None)
+        finally:
+            job.pop('_finishing', None)
+
+    async def _finish_tracked(self, job):
+        pid = job['prompt_id']
         # ComfyUI sends «success» a moment BEFORE it writes the result into its history (it still registers the files); on a busy or
         # slow machine the first look is empty although the video is already in the output folder: look again for up to ~40 seconds
         outputs = {}
@@ -547,10 +561,18 @@ class App:
                 _, hist = await self.comfy_json("GET", f"/history/{pid}")
             except Exception:
                 hist = None
-            outputs = (hist or {}).get(pid, {}).get("outputs", {})
+            entry = (hist or {}).get(pid, {})
+            if (entry.get('status') or {}).get('status_str') == 'error':
+                await self.broadcast({'type': 'error', 'prompt_id': pid, 'message': self.history_error(entry['status'])})
+                return
+            outputs = entry.get('outputs', {})
             if outputs:
                 break
             await asyncio.sleep(1)
+        await self._collect_outputs(job, outputs)
+
+    async def _collect_outputs(self, job, outputs):
+        pid = job['prompt_id']
         tagged = [(nid, f) for nid, out in outputs.items() for lst in out.values() if isinstance(lst, list)
                   for f in lst if isinstance(f, dict) and "filename" in f]
         files = [f for _, f in tagged]
@@ -589,7 +611,12 @@ class App:
                 return (0 if t.startswith("Лист") else 1, t)
             picked.sort(key=order)
         items = []
+        previous = [it for it in self.library.items if it.get('prompt_id') == pid]
         for f in picked:
+            saved = next((it for it in previous if it['file'] == f), None)
+            if saved:
+                items.append(self.public(saved))
+                continue
             item = dict(job["meta"], id=uuid.uuid4().hex[:12], prompt_id=pid,
                         date=datetime.now().isoformat(timespec="seconds"), fav=False, file=f,
                         ext=Path(f["filename"]).suffix.lstrip(".").lower() or "mp4")
@@ -606,6 +633,7 @@ class App:
             await self.archive_item(item)
             items.append(self.public(item))
         await self.broadcast({"type": "done", "prompt_id": pid, "item": items[0], "items": items})
+        return items
 
     async def broadcast(self, payload):
         text = json.dumps(payload, ensure_ascii=False)
@@ -1303,44 +1331,159 @@ class App:
         week = datetime.now().timestamp() - 7 * 86400
         return [j for j in data if isinstance(j, dict) and j.get("graph") and j.get("saved", 0) > week]
 
+    def queue_origin(self):
+        # У встроенного движка порт может меняться после перезапуска; в адресе своего ComfyUI бывает личное.
+        root = self.comfy_root() if self.config.get('engine') == 'managed' and not self.comfy_override else None
+        source = f'managed:{root}' if root else self.comfy.rstrip('/')
+        return hashlib.sha256(source.encode('utf-8')).hexdigest()
+
     def save_queue(self):
         items = list(self.saved_queue) + [
             {"graph": j["graph"], "stages": j.get("stages") or {}, "meta": j.get("meta") or {}, "last_output": j.get("last_output", False),
-             "titles": j.get("titles") or {}, "pid": j.get("prompt_id"), "saved": datetime.now().timestamp()}
+             "titles": j.get("titles") or {}, "scenes": j.get("scenes"), "pid": j["prompt_id"],
+             "client_id": self.client_id, "origin": j.get('origin'), "saved": datetime.now().timestamp()}
             for j in dict.values(self.jobs) if j.get("graph")]
         try:
             if items:
-                QUEUE_FILE.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+                QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                tmp = QUEUE_FILE.with_suffix('.tmp')
+                tmp.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(QUEUE_FILE)
             elif QUEUE_FILE.exists():
                 QUEUE_FILE.unlink()
-        except OSError:
-            pass
+        except OSError as e:
+            self.note_error(f'Не удалось сохранить очередь: {e}')
+
+    @staticmethod
+    def recovery_row(j):
+        return {'prompt_id': j.get('prompt_id') or j.get('pid'), 'mode': j['meta'].get('mode'),
+                'prompt': (j['meta'].get('prompt') or '')[:120]}
 
     async def h_queue_saved(self, _req):
-        return web.json_response({"count": len(self.saved_queue),
-                                  "items": [{"mode": j["meta"].get("mode"), "prompt": (j["meta"].get("prompt") or "")[:80]} for j in self.saved_queue]})
+        return web.json_response({'count': len(self.saved_queue), 'items': [self.recovery_row(j) for j in self.saved_queue],
+                                  'jobs': [dict(self.recovery_row(j), state=j['state'], stage=j.get('stage'))
+                                           for j in self.jobs.values() if j.get('recovered')]})
 
-    async def h_queue_resume(self, _req):
-        items, self.saved_queue = list(self.saved_queue), []
-        self.save_queue()
-        out = []
-        try:  # a job that ComfyUI still has (or already finished) while only the program was closed is not run twice
-            _, q = await self.comfy_json("GET", "/queue")
-            alive = {str(x[1]) for key in ("queue_running", "queue_pending") for x in (q or {}).get(key, []) if len(x) > 1}
-        except Exception:
-            alive = set()
-        for j in items:
-            if j.get("pid") and (j["pid"] in alive):
+    async def _recovery_get(self, path):
+        status, data = await self.comfy_json('GET', path, timeout=aiohttp.ClientTimeout(total=10))
+        if status != 200 or not isinstance(data, dict):
+            raise ValueError('ComfyUI did not return a snapshot')
+        return data
+
+    @staticmethod
+    def history_error(status):
+        return next((m[1]['exception_message'] for m in status.get('messages', [])
+                     if isinstance(m, (list, tuple)) and len(m) == 2 and m[0] == 'execution_error'
+                     and isinstance(m[1], dict) and m[1].get('exception_message')), 'ComfyUI прервал задание.')
+
+    async def h_queue_resume(self, req):
+        """{} reconciles saved local jobs without submitting. {restart_id} opts one missing job into replay.
+        Missing and unconfirmed records stay on disk; each partial result is reported independently.
+        """
+        try:
+            body = await req.json() if req.can_read_body else {}
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or ('restart_id' in body and not isinstance(body['restart_id'], str)):
+            return web.json_response({'error': 'Нужен идентификатор сохранённого задания.'}, status=400)
+        async with self.recovery_lock:  # два клика или два окна не должны отправить один граф дважды
+            return await self._recover_queue(body.get('restart_id'))
+
+    async def _recover_queue(self, restart_id):
+        result = {key: [] for key in ('jobs', 'finished', 'missing', 'failed', 'deferred')}
+        if not self.saved_queue:
+            return web.json_response(result)
+        if self.rh():
+            return web.json_response({'error': 'Для восстановления переключитесь с RunningHub на исходный ComfyUI.'}, status=409)
+        unavailable = (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, AuthNeeded)
+        try:
+            q = await self._recovery_get('/queue')
+            alive = {}
+            for key, state in (('queue_pending', 'queued'), ('queue_running', 'running')):
+                if not isinstance(q.get(key), list):
+                    raise ValueError('invalid queue')
+                for row in q[key]:
+                    if not isinstance(row, list) or len(row) < 2 or not isinstance(row[1], str):
+                        raise ValueError('invalid queue item')
+                    alive[row[1]] = state
+        except unavailable:
+            return web.json_response({'error': 'Не удалось проверить очередь ComfyUI. Сохранённые задания не изменены.'}, status=503)
+
+        for j in list(self.saved_queue):
+            row = self.recovery_row(j)
+            pid = row['prompt_id']
+            origin = self.queue_origin()
+            if j.get('origin') and j['origin'] != origin:
+                result['deferred'].append(dict(row, message='Запись относится к другому ComfyUI. Верните исходное подключение.'))
                 continue
-            resp = await self.queue(j["graph"], j.get("stages") or {}, j.get("meta") or {}, j.get("last_output", False), j.get("titles"))
-            pid = json.loads(resp.text)["prompt_id"]
-            out.append({"prompt_id": pid, "mode": j["meta"].get("mode"), "prompt": j["meta"].get("prompt", "")})
-        return web.json_response({"jobs": out})
+            job = dict(j, prompt_id=pid, recovered=True, origin=origin, stage=None, t0=asyncio.get_running_loop().time())
+            if pid in alive:
+                self.saved_queue.remove(j)
+                self.jobs[pid] = dict(job, state=alive[pid])  # JobStore persists this handoff in one snapshot
+                result['jobs'].append(dict(row, state=alive[pid]))
+                continue
+            try:
+                hist = await self._recovery_get(f'/history/{pid}')
+                if hist and pid not in hist:
+                    raise ValueError('unexpected history response')
+                if pid in hist:
+                    entry = hist[pid]
+                    if not isinstance(entry, dict) or not isinstance(entry.get('status', {}), dict):
+                        raise ValueError('invalid history')
+                    st = entry.get('status', {})
+                    if st.get('status_str') == 'error':
+                        result['failed'].append(dict(row, message=self.history_error(st)))
+                    elif st.get('completed') or st.get('status_str') == 'success' or (not st and entry.get('outputs')):
+                        items = await self._collect_outputs(job, entry.get('outputs') or {})
+                        if items:
+                            result['finished'].append(dict(row, items=items))
+                        else:
+                            result['failed'].append(dict(row, message='В результате нет видео или изображения.'))
+                    else:
+                        result['deferred'].append(dict(row, message='Запись есть в истории, но результат ещё не подтверждён.'))
+                        continue
+                else:
+                    # Запись в Библиотеке может пережить историю ComfyUI: она чистится при перезапуске.
+                    items = [self.public(it) for it in self.library.items if it.get('prompt_id') == pid]
+                    if items:
+                        result['finished'].append(dict(row, items=items))
+                    elif pid and restart_id == pid:
+                        # Повторяем сохранённый граф как есть. Текущий ComfyUI принимает исходный UUID,
+                        # поэтому потерянное подтверждение сверяется следующей проверкой, а не слепым ретраем.
+                        await self.stop_llm()
+                        status, reply = await self.comfy_json('POST', '/prompt', json={
+                            'prompt': j['graph'], 'prompt_id': pid, 'client_id': self.client_id,
+                            'extra_data': {'preview_method': 'auto'}})
+                        if status != 200 or not isinstance(reply, dict) or not reply.get('prompt_id'):
+                            result['deferred'].append(dict(row, message=comfy_error_text(reply)))
+                            continue
+                        new_id = reply['prompt_id']
+                        self.saved_queue.remove(j)
+                        self.jobs[new_id] = dict(job, prompt_id=new_id, state='queued')
+                        result['jobs'].append(dict(row, prompt_id=new_id, state='queued'))
+                        continue
+                    else:
+                        result['missing'].append(row)
+                        continue
+                self.saved_queue.remove(j)
+                self.save_queue()
+            except unavailable:
+                result['deferred'].append(dict(row, message='Нет подтверждения от ComfyUI. Задание сохранено.'))
+        return web.json_response(result)
 
-    async def h_queue_discard(self, _req):
-        self.saved_queue = []
-        self.save_queue()
-        return web.json_response({"ok": True})
+    async def h_queue_discard(self, req):
+        try:
+            body = await req.json() if req.can_read_body else {}
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or ('ids' in body and not (
+                isinstance(body['ids'], list) and all(isinstance(k, str) for k in body['ids']))):
+            return web.json_response({'error': 'Нужен список идентификаторов заданий.'}, status=400)
+        async with self.recovery_lock:
+            ids = set(body['ids']) if 'ids' in body else None  # empty body: legacy explicit discard-all
+            self.saved_queue = [j for j in self.saved_queue if ids is not None and j.get('pid') not in ids]
+            self.save_queue()
+        return web.json_response({'ok': True})
 
     async def h_support(self, _req):
         """Open the author's donation page (a fixed address, never taken from the request)."""
@@ -2061,13 +2204,13 @@ class App:
             except Exception:
                 pass
         status, res = await self.comfy_json("POST", "/prompt", json={
-            "prompt": graph, "client_id": CLIENT_ID,
+            "prompt": graph, "client_id": self.client_id,
             "extra_data": {"preview_method": "auto"}})
         if status != 200:
             return web.json_response({"error": comfy_error_text(res)}, status=400)
         pid = res["prompt_id"]
         self.jobs[pid] = {"prompt_id": pid, "state": "queued", "stages": stages, "stage": None, "meta": meta, "last_output": last_output, "titles": titles or {},
-                          "graph": graph, "scenes": scenes,
+                          "graph": graph, "scenes": scenes, "origin": self.queue_origin(),
                           "t0": asyncio.get_event_loop().time()}
         return web.json_response({"prompt_id": pid, "seed": meta["seed"], "queue_number": res.get("number")})
 
@@ -2794,7 +2937,7 @@ class App:
                  "Z": {"class_type": "GetImageSize", "inputs": {"image": ["G", 0]}},
                  "N": {"class_type": "PreviewAny", "inputs": {"source": ["Z", 2]}},
                  "F": {"class_type": "PreviewAny", "inputs": {"source": ["G", 2]}}}
-        status, res = await self.comfy_json("POST", "/prompt", json={"prompt": probe, "client_id": CLIENT_ID})
+        status, res = await self.comfy_json("POST", "/prompt", json={"prompt": probe, "client_id": self.client_id})
         if status != 200:
             raise web.HTTPBadRequest(text="ComfyUI не смог открыть это видео: " + comfy_error_text(res))
         pid = res["prompt_id"]
@@ -3517,7 +3660,7 @@ class App:
             "3": {"class_type": "MelBandRoFormerSampler", "inputs": {"model": ["2", 0], "audio": ["1", 0]}},
             "4": {"class_type": "SaveAudio", "inputs": {"audio": ["3", 0], "filename_prefix": "H3Workspace/audio/vocals"}},
         }
-        status, res = await self.comfy_json("POST", "/prompt", json={"prompt": graph, "client_id": CLIENT_ID})
+        status, res = await self.comfy_json("POST", "/prompt", json={"prompt": graph, "client_id": self.client_id})
         if status != 200:
             return web.json_response({"error": comfy_error_text(res)}, status=400)
         pid = res["prompt_id"]
@@ -3908,7 +4051,7 @@ class App:
         except web.HTTPException as e:
             return web.json_response({"error": e.text or "Ошибка"}, status=e.status)
         await self.stop_llm()   # the agent's model would compete for video memory
-        status, res = await self.comfy_json("POST", "/prompt", json={"prompt": graph, "client_id": CLIENT_ID})
+        status, res = await self.comfy_json("POST", "/prompt", json={"prompt": graph, "client_id": self.client_id})
         if status != 200:
             return web.json_response({"error": comfy_error_text(res)}, status=400)
         pid = res["prompt_id"]
@@ -4010,7 +4153,8 @@ class App:
                 if self.rh() or not self.jobs:
                     continue
                 _, q = await self.comfy_json("GET", "/queue", timeout=aiohttp.ClientTimeout(total=10))
-                queued_ids = {str(item[1]) for item in (q or {}).get("queue_running", []) + (q or {}).get("queue_pending", [])}
+                running_ids = {str(item[1]) for item in (q or {}).get('queue_running', [])}
+                queued_ids = running_ids | {str(item[1]) for item in (q or {}).get('queue_pending', [])}
             except Exception:
                 continue   # ComfyUI unreachable or restarting: not the watchdog's case
             now = asyncio.get_event_loop().time()
@@ -4019,11 +4163,27 @@ class App:
                     continue
                 age, silent = now - job.get("t0", now), now - job.get("last_ev", job.get("t0", now))
                 if pid in queued_ids:
-                    if job["state"] == "running" and silent > 600:
-                        # ComfyUI still holds the job but has been silent for 10 minutes: a hung node.
-                        # (Legit quiet phases like loading a huge model from disk are covered by the threshold.)
+                    # В старых снимках нет client_id: когда задание начнётся, скажет сама очередь.
+                    if job.get('recovered') and job['state'] == 'queued' and pid in running_ids:
+                        job['state'] = 'running'
+                        job['last_ev'] = now
+                        await self.send_stage(job, 'running')
+                        continue
+                    if job["state"] == "running" and silent > watchdog.QUIET_NOTICE:
+                        # ComfyUI всё ещё держит задание: длинный клип тратит ~20 минут на один шаг,
+                        # поэтому тишина сама по себе — не зависание; только часы тишины при простое карты
+                        gpu = await asyncio.to_thread(self.monitor.gpu)
+                        busy = None if not gpu else (gpu.get("util") or 0) >= 5
+                        if watchdog.job_verdict(True, silent, busy) == "notice":
+                            if not job.get("quiet_notice"):
+                                job["quiet_notice"] = True
+                                await self.broadcast({"type": "notice", "text":
+                                    "Долгий шаг: ComfyUI молчит больше 10 минут. Это не зависание — "
+                                    "длинный клип считает один шаг десятки минут, ждём."})
+                            continue
                         if self.process:   # managed engine: restart it, like «Остановить генерацию» does
-                            text = "Генерация зависла: ComfyUI молчит больше 10 минут. Перезапускаем движок, это займёт около минуты."
+                            text = ("Генерация не подаёт признаков жизни больше двух часов, а видеокарта простаивает. "
+                                    "Перезапускаем движок, это займёт около минуты.")
                             self.note_error(text)
                             await self.broadcast({"type": "notice", "text": text})
                             try:
@@ -4040,8 +4200,9 @@ class App:
                                                           **({"message": "Генерация зависла в ComfyUI и была снята при перезапуске движка. "
                                                                           "Отправьте её ещё раз."} if jid == pid else {})})
                         else:
-                            await self._stale_job(job, "Генерация зависла в вашем ComfyUI (больше 10 минут без ответа). "
-                                                       "Закройте окно ComfyUI и запустите его заново, затем отправьте генерацию ещё раз.")
+                            await self._stale_job(job, "Генерация не подаёт признаков жизни больше двух часов, "
+                                                       "а видеокарта при этом простаивает. Проверьте окно ComfyUI "
+                                                       "и отправьте генерацию ещё раз.")
                     continue
                 if job["state"] == "queued" and age > 240:
                     _, hist = await self.comfy_json("GET", f"/history/{pid}")
@@ -4340,6 +4501,8 @@ class App:
             "speech_ready": self.speech_status()["ready"], "speech_size": speech.MODEL_SIZE + speech.WHISPER_ZIP_SIZE,
             "speech": self.speech_status(),
             "installed": self.llm.installed(variant), "running": self.llm.alive(),
+            "engine": self.llm.backend(),
+            "placement": self.llm.placement() if self.llm.alive() else None,
             "installing": bool(self.agent_installer), "dir": str(self.llm.root), "managed": self.config.get("engine") == "managed",
             "dir_chosen": bool(self.config.get("llm_dir")) or self.config.get("engine") == "managed",
             "skills": [self.skill_public(s) for s in self.skills.list()],
@@ -4375,7 +4538,7 @@ class App:
             try:
                 await ag.install(self.agent_installer, self.llm.root, variant,
                                  runtime_only=bool(self.config.get("llm_custom")),
-                                 whisper_dir=self.config.get("whisper_dir"))
+                                 whisper_dir=self.config.get("whisper_dir"), hw=self.hw)
                 await emit({"step": "agent", "state": "done", "label": "Модель агента установлена"})
             except engine.Cancelled:
                 await emit({"step": "agent", "state": "cancelled", "label": "Скачивание остановлено"})

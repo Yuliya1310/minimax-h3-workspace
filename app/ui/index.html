@@ -1722,10 +1722,12 @@ img.pr-media{object-position:center 38%}
       <div class="head">
         <div>
           <h1>Очередь</h1>
-          <p>Нажимайте «Сгенерировать» в любом разделе: задания встанут по порядку и сами сохранятся в Библиотеку. Не закрывайте приложение, пока идёт очередь</p>
+          <p>Здесь можно проверить ход генерации и вернуть задания после закрытия приложения. Повторный рендер запускается только по вашему выбору.</p>
         </div>
+        <button class="btn" id="qRecover" type="button">Проверить сохранённые задания</button>
         <button class="btn" id="qClear" hidden>Очистить завершённые</button>
       </div>
+      <div id="qRecovery" class="card" hidden><div id="qRecoveryStatus" role="status"></div><div id="qRecoveryList"></div></div>
       <div class="q-list" id="qList" style="display:grid;gap:10px;align-content:start"></div>
     </section>
 
@@ -2191,22 +2193,59 @@ function rhMenuToggle(btn) {
   new MutationObserver(paint).observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });   // zoom A-/A+ and the width of the side menu
   paint();
 })();
-let SQ_ASKED = false;
-async function askSavedQueue() {
-  if (SQ_ASKED) return; SQ_ASKED = true;
-  try {
-    const r = await (await fetch('/api/queue/saved')).json();
-    if (!r.count) return;
-    const cancel = () => fetch('/api/queue/discard', { method: 'POST' });
-    const btn = $('#confirm [data-close]'); btn.addEventListener('click', cancel, { once: true });
-    confirmBox('Продолжить очередь?', `В прошлый раз осталось ${r.count} незавершённых заданий (программу закрыли или пропало питание). Продолжить их? Задание, которое шло, начнётся заново. Если нажать «Отмена», они будут забыты.`, 'Продолжить', async () => {
-      btn.removeEventListener('click', cancel);
-      const j = await postJSON('/api/queue/resume');
-      (j.jobs || []).forEach(x => qAdd(x.prompt_id, x.mode, x.prompt));
-      toast('Задания вернулись в очередь'); goTo('queue');
-    });
-  } catch {}
+let recoveryBusy = false, recoveryChecked = false;
+function restoreQueueRow(row) {
+  if (!QUEUE.some(j => j.id === row.prompt_id)) qAdd(row.prompt_id, row.mode, row.prompt, row.state, row.stage);
 }
+async function checkSavedQueue(restartId = null, automatic = false) {
+  if (!API || recoveryBusy || (automatic && recoveryChecked)) return;
+  recoveryBusy = true;
+  const btn = $('#qRecover'), panel = $('#qRecovery'), msg = $('#qRecoveryStatus'), list = $('#qRecoveryList');
+  btn.disabled = true;
+  try {
+    const response = await fetch('/api/queue/saved');
+    if (!response.ok) throw new Error('Не удалось прочитать сохранённую очередь.');
+    const snapshot = await response.json();
+    (snapshot.jobs || []).forEach(restoreQueueRow);
+    if (!snapshot.count && automatic) { recoveryChecked = true; return; }
+    panel.hidden = false; list.replaceChildren(); msg.textContent = 'Проверяем очередь и историю ComfyUI…';
+    const r = await postJSON('/api/queue/resume', restartId ? { restart_id: restartId } : {});
+    recoveryChecked = true;
+    r.jobs.forEach(restoreQueueRow);
+    for (const row of r.finished) {
+      restoreQueueRow(row);
+      if (QUEUE.find(j => j.id === row.prompt_id)?.state !== 'done')
+        qHandle({type:'done', prompt_id:row.prompt_id, item:row.items[0], items:row.items});
+    }
+    for (const row of r.failed) {
+      restoreQueueRow(row); qHandle({type:'error', prompt_id:row.prompt_id, message:row.message});
+    }
+    for (const row of [...r.missing, ...r.deferred]) {
+      const line = document.createElement('div'); line.className = 'vl-row';
+      const label = document.createElement('span');
+      label.textContent = `${row.prompt || row.mode || 'Задание'} · ${row.message || 'Нет в очереди и истории ComfyUI'}`;
+      line.append(label);
+      if (r.missing.includes(row)) {
+        const retry = document.createElement('button'); retry.className = 'btn'; retry.textContent = 'Запустить заново';
+        retry.onclick = () => confirmBox('Пересчитать эту сцену?', 'Прогресс прежнего рендера не восстановится. Перед отправкой ещё раз проверим очередь и историю.', 'Запустить заново', () => checkSavedQueue(row.prompt_id));
+        line.append(retry);
+      }
+      list.append(line);
+    }
+    if (r.missing.length || r.deferred.length) {
+      const forget = document.createElement('button'); forget.className = 'btn'; forget.textContent = 'Убрать оставшиеся из восстановления';
+      forget.onclick = () => confirmBox('Убрать сохранённые записи?', 'Только перечисленные записи исчезнут из списка восстановления. Задания в ComfyUI не будут отменены.', 'Убрать записи', async () => {
+        try { await postJSON('/api/queue/discard', {ids:[...r.missing, ...r.deferred].map(x => x.prompt_id)}); await checkSavedQueue(); } catch (e) { toast(e.message); }
+      });
+      list.append(forget);
+    }
+    msg.textContent = snapshot.count ? `В очереди: ${r.jobs.length}. В библиотеке: ${r.finished.length}. С ошибкой: ${r.failed.length}. Осталось проверить: ${r.deferred.length}. Не найдены: ${r.missing.length}.` : 'Нет сохранённых заданий для восстановления.';
+    if (automatic && snapshot.count) toast('Проверка сохранённых заданий завершена. Результаты — в разделе «Очередь».');
+  } catch (err) {
+    panel.hidden = false; msg.textContent = `${err.message} Нажмите «Проверить сохранённые задания», когда связь восстановится.`;
+  } finally { btn.disabled = false; recoveryBusy = false; }
+}
+$('#qRecover').onclick = () => checkSavedQueue();
 let OFFER_SHOWN = false;
 function offerNewModes(s) {
   const o = (s.offer_modes || [])[0];
@@ -2270,7 +2309,7 @@ async function loadStatus() {
     setEngine(s.online);
     if (!s.online) { if (s.engine === 'managed') renderOfflineEngine(); return; }
     setComfyOld(s);
-    askSavedQueue();
+    checkSavedQueue(null, true);
     renderModels(s);
     offerNewModes(s);
   } catch { setEngine(false); }
@@ -4214,8 +4253,8 @@ const fileName = it =>`h3_${it.mode}_${it.date.toISOString().slice(0, 16).replac
 const QUEUE = [];
 const QSTAGE = { queued: 'ждёт своей очереди', load: 'загрузка моделей', encode: 'кодирование', sample: 'генерация', sample2: 'проход 2', upscale: 'апскейл',
   decode: 'сборка видео', save: 'сохранение', cloud_queued: 'в очереди RunningHub', cloud_run: 'считается в облаке' };
-function qAdd(id, mode, prompt) {
-  const j = { id, mode, prompt: prompt || '', state: 'queued', stage: 'queued', t0: null, detached: false, lastEv: performance.now() };
+function qAdd(id, mode, prompt, state = 'queued', stage = null) {
+  const j = { id, mode, prompt: prompt || '', state, stage: stage || (state === 'running' ? 'running' : 'queued'), t0: null, detached: false, lastEv: performance.now() };
   QUEUE.push(j);
   (earlyEvents.get(id) || []).forEach(qHandle);
   qRender();
@@ -9454,7 +9493,9 @@ async function agStatus() {
       + (s.vision ? 'Изображения видит (найден mmproj). ' : '<span class="warn-t">Файла mmproj нет — изображения агент не увидит.</span> ')
       + (s.installed ? '' : 'Осталось скачать движок llama.cpp (37 МБ).')
     : `<b style="color:var(--text)">${esc(s.title)}</b> — бесплатная локальная модель (Apache 2.0), понимает русский и изображения. `
-      + (s.installed ? 'Пока агент работает, генерация видео ждёт: обе модели вместе не помещаются в видеопамять — приложение переключает их само.' : `Нужно скачать один раз: ~${(s.size / 1e9).toFixed(1)} ГБ.`);
+      + (s.installed ? 'Пока агент работает, генерация видео ждёт: обе модели вместе не помещаются в видеопамять — приложение переключает их само.' : `Нужно скачать один раз: ~${(s.size / 1e9).toFixed(1)} ГБ.`)
+      + (s.engine && s.engine.title ? ` Движок: ${esc(s.engine.title)}.` : '')
+      + (s.placement && s.placement.where === 'CPU' ? ' <span class="warn-t">Сейчас считает на процессоре (видеопамять занята) — будет медленно.</span>' : '');
   const nReady = (s.variants || []).filter(o => o.have).length + (s.my_model ? 1 : 0);
   $('#agVarBox > summary').textContent = `Выбор моделей агента (готово: ${nReady} из ${(s.variants || []).length + (s.my_model ? 1 : 0)})`;
   $('#agVariants').innerHTML = (s.my_model ? `<button class="agv${s.my_model.current ? ' on' : ''}" type="button" data-my="1"><b>Моя модель: ${esc(s.my_model.title)}</b><span class="tg">ваша</span><span class="rd ok">✓ ГОТОВО${s.my_model.current ? ' · ВЫБРАНА' : ''}</span></button>` : '')
@@ -11228,7 +11269,7 @@ if (API) {
     if (!s.configured) { setNavLocked(true); goTo('models'); if (!s.installing) showWelcome(); return; }
     setTimeout(() => goTo('presets'), 700);   // the program always opens on the start page
   });
-  fetch('/api/library').then(r => r.json()).then(items => { items.forEach(it => LIB.push(normItem(it))); renderLib(); });
+  fetch('/api/library').then(r => r.json()).then(items => { const seen = new Set(LIB.map(it => it.id)); items.forEach(it => { if (!seen.has(it.id)) LIB.push(normItem(it)); }); renderLib(); });
 } else
 // demo items so the library isn't empty in the mockup
 [
