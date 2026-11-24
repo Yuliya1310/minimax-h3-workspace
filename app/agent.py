@@ -43,12 +43,12 @@ LLM_VARIANTS = {
     # Qwen3-VL 8B (Apache 2.0) and its abliterated version
     "qwen3vl-8b": {"title": "Qwen3-VL 8B", "min_vram": 8,
                    "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF", "model": "Qwen3VL-8B-Instruct-Q4_K_M.gguf", "model_size": 5.028e9,
-                   "mmproj": "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf", "mmproj_size": 0.752e9, "ctx": 32768},
+                   "mmproj": "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf", "mmproj_size": 0.752e9, "ctx": 65536},
     "qwen3vl-8b-unc": {"title": "Qwen3-VL 8B без цензуры", "uncensored": True, "min_vram": 8,
                        "repo": "noctrex/Huihui-Qwen3-VL-8B-Instruct-abliterated-GGUF",
                        "model": "Huihui-Qwen3-VL-8B-Instruct-abliterated-Q4_K_M.gguf", "model_size": 5.028e9,
                        "mmproj": "mmproj-F16.gguf", "mmproj_as": "mmproj-qwen3vl-8b-unc-F16.gguf",
-                       "mmproj_size": 1.159e9, "ctx": 32768},
+                       "mmproj_size": 1.159e9, "ctx": 65536},
 }
 
 
@@ -561,7 +561,7 @@ def system_prompt(skills_text, target, ctx):
             "ГЛАВНОЕ: каждая следующая сцена продолжает прошлую, но модель видит только последнюю секунду прошлой сцены и "
             "референс-картинки. Текст соседних сцен она НЕ видит. Поэтому:\n"
             "- в КАЖДОЙ сцене коротко заново назови героя и место, ссылаясь на референс-картинки как <Picture 1>, <Picture 2> и т.д. "
-            f"(приложено картинок: {n_img}, можно до 5; пользователь сам решает, что на какой: персонаж, локация, предмет"
+            f"(приложено картинок: {n_img}, можно до 9; пользователь сам решает, что на какой: персонаж, локация, предмет"
             + ("; КАРТИНОК НЕТ: теги <Picture N> не используй, а в каждой сцене словами опиши героя, одежду и место, одинаково во всех сценах" if not n_img else "")
             + "); "
             "внешность подробно не расписывай, её даёт картинка;\n"

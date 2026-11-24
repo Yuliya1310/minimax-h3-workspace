@@ -3268,7 +3268,7 @@ class App:
                 self._long_run = None
 
     async def generate_long(self, req):
-        form, files, prompt, aspect, quality, seed = await self.read_form(req, ("img0", "img1", "img2", "img3", "img4", "aud0", "aud1", "aud2", "srcvid", "rvid0", "rvid1", "rvid2", "uvid0", "uvid1", "aref0", "aref1") + tuple(f"simg{i}_{j}" for i in range(80) for j in range(5)) + tuple(f"svoice{i}" for i in range(80)) + tuple(f"samp{i}_{j}" for i in range(80) for j in range(2)) + ("rmaud0", "rmaud1", "rmaud2"), need_prompt=False)   # the texts are in the scenes, there is no single prompt
+        form, files, prompt, aspect, quality, seed = await self.read_form(req, ("img0", "img1", "img2", "img3", "img4", "img5", "img6", "img7", "img8", "aud0", "aud1", "aud2", "srcvid", "rvid0", "rvid1", "rvid2", "uvid0", "uvid1", "aref0", "aref1") + tuple(f"simg{i}_{j}" for i in range(80) for j in range(5)) + tuple(f"svoice{i}" for i in range(80)) + tuple(f"samp{i}_{j}" for i in range(80) for j in range(2)) + ("rmaud0", "rmaud1", "rmaud2"), need_prompt=False)   # the texts are in the scenes, there is no single prompt
         self._long_run = re.sub(r"[^A-Za-z0-9]", "", form.get("run", ""))[:32]   # the references are kept even if the request is refused later
         try:
             scenes = [(str(x.get("prompt", "")).strip(), float(x.get("sec", 10)), bool(x.get("fresh"))) for x in json.loads(form.get("scenes") or "[]")]
@@ -3306,7 +3306,7 @@ class App:
             pass
         if not scenes:
             raise web.HTTPBadRequest(text="Напишите хотя бы одну сцену")
-        images = [files[f"img{i}"] for i in range(5) if f"img{i}" in files]
+        images = [files[f"img{i}"] for i in range(9 if not action else 5) if f"img{i}" in files]   # the Video studio and the clip take up to 9 pictures, the action studio 5
         audio = None if action else files.get("aud0")   # the action studio takes up to 3 audio SAMPLES instead of one track
         auds = [files[f"aud{i}"] for i in range(3) if f"aud{i}" in files] if action else []
         rvids = [files[f"rvid{i}"] for i in range(3) if f"rvid{i}" in files]   # RefMod videos of the Reference Mode cards (heroes as <Video N>)
@@ -3908,11 +3908,11 @@ class App:
             lost = []
             for cls, field, name in wf.TD_MODELS[v]:
                 if (cls, field) not in choices:
-                    choices[(cls, field)] = await self.comfy_choices(cls, field) if out["online"] else []
+                    choices[(cls, field)] = await self.comfy_choices(cls, field, strict=True) if out["online"] else None
                 base = name.split("/")[-1].lower()
-                found = next((n for n in choices[(cls, field)] if n.replace(chr(92), "/").split("/")[-1].lower() == base), None)
+                found = next((n for n in (choices[(cls, field)] or []) if n.replace(chr(92), "/").split("/")[-1].lower() == base), None)
                 out["models"][base] = found or ""
-                if not found and choices[(cls, field)]:   # an empty list means ComfyUI did not tell the choices: then the file is not reported as missing
+                if not found and choices[(cls, field)] is not None:   # None = ComfyUI did not tell the choices (not reported); an empty list = the folder has no files at all (missing)
                     fl = wf.TD_FILES[base]
                     lost.append({"file": fl["file"], "folder": "models/" + self.TD_FOLDERS[cls] + "/3D", "sub": self.TD_FOLDERS[cls], "url": fl["url"], "page": fl["page"], "size": fl["size"]})
             out["variants"][v] = {"nodes": nodes, "models": lost}
@@ -4082,7 +4082,8 @@ class App:
                 raise web.HTTPBadRequest(text="Нет нод сохранения 3D (s_tools). Нажмите «Установить ноды» на странице и перезапустите ComfyUI.")
             raise web.HTTPBadRequest(text="В вашем ComfyUI нет нод: " + ", ".join(v["nodes"]) + ". Обновите ComfyUI до версии 0.45 или новее (Настройки, блок «Движок»).")
         if v["models"]:
-            raise web.HTTPBadRequest(text="Не найдены файлы моделей: " + "; ".join(f"{m['file']} (папка {m['folder']})" for m in v["models"]))
+            raise web.HTTPBadRequest(text="ComfyUI не видит файлы моделей для 3D: " + "; ".join(f"{m['file']} (папка {m['folder']})" for m in v["models"])
+                                     + ". Что делать: на этой странице вверху нажмите кнопку скачивания моделей (или положите файлы в указанные папки), затем перезапустите ComfyUI и повторите.")
         try:
             faces = int(min(1000000, max(5000, float(form.get("faces") or 200000))))
             seed = int(form.get("seed") or 0) or random.randrange(2 ** 40)
@@ -4126,7 +4127,12 @@ class App:
                                                "preview_dir": str(self.td_staging())})
         td = {"run": run, "autosave": autosave, "dest": str(dest), "format": fmt, "variant": variant, "seed": seed}
         sub = {"triposplat": "3D · Точно (TripoSplat)", "trellis": "3D · Чисто (Trellis)"}[variant]
-        return await self.queue(graph, stages, {"mode": "td", "sub": sub, "prompt": name, "aspect": "", "q": "", "len": 0.0, "res": "", "seed": seed, "td": td})
+        try:
+            return await self.queue(graph, stages, {"mode": "td", "sub": sub, "prompt": name, "aspect": "", "q": "", "len": 0.0, "res": "", "seed": seed, "td": td})
+        except web.HTTPException as e:   # ComfyUI refused the graph: the reason goes to the screen with a plain explanation
+            if e.text:
+                raise type(e)(text=errorhelp.explain(e.text))
+            raise
 
     async def finish_td(self, job, outputs):
         pid = job["prompt_id"]
@@ -4468,17 +4474,18 @@ class App:
                                                 "len": float(o["seconds"]) if mode == "image" else float((item or {}).get("len") or 0),
                                                 "res": f"{vs[0]}×{vs[1]}" if vs else "", "seed": o["seed"], "icons": icons})
 
-    async def comfy_choices(self, cls, field):
-        """The file names ComfyUI offers in a loader node (the list of its models)."""
+    async def comfy_choices(self, cls, field, strict=False):
+        """The file names ComfyUI offers in a loader node (the list of its models). strict=True: None when ComfyUI did not tell the list
+        (an empty list then means that the folder really has no files)."""
         try:
             status, data = await self.comfy_json("GET", f"/object_info/{cls}", timeout=aiohttp.ClientTimeout(total=15))
             entry = data[cls]["input"]["required"][field]
             spec = entry[0]
             if spec == "COMBO" and len(entry) > 1 and isinstance(entry[1], dict):   # the newer ComfyUI writes a list of choices this way
                 spec = entry[1].get("options")
-            return list(spec) if isinstance(spec, list) else []
+            return list(spec) if isinstance(spec, list) else (None if strict else [])
         except Exception:
-            return []
+            return None if strict else []
 
     async def h_icons_video(self, req):
         """Picture -> video exactly as in the user's Telegram workflow: fl2va + Turbo 4-step v1.2 (0.8), 6 steps, the picture is the first AND the last frame."""
@@ -5185,7 +5192,7 @@ class App:
             raise web.HTTPBadRequest(text="Идёт генерация: описание можно будет сделать, когда она закончится.")
         variant = await self.llm_variant()
         if not self.remote() and not self.llm.installed(variant):
-            raise web.HTTPBadRequest(text="Модель агента ещё не скачана: её можно скачать в разделе «Агент». Пока впишите описание вручную.")
+            raise web.HTTPBadRequest(text="Модель агента ещё не скачана: её можно скачать на странице «LLM». Пока впишите описание вручную.")
         if not self.remote() and not self.llm.vision(variant):
             raise web.HTTPBadRequest(text="У выбранной модели агента нет файла «зрения» (mmproj): она не видит картинки. Впишите описание вручную.")
         if not self.remote() and not self.llm.alive():
@@ -5383,7 +5390,7 @@ class App:
                 return typed
             await self.llm_variant()
             if not self.speech_status()["ready"]:
-                raise web.HTTPBadRequest(text="Программа не может сама понять слова в образце: модель распознавания речи не скачана (карточка «Модель» в разделе «Агент»). Впишите, что сказано в образце, вручную.")
+                raise web.HTTPBadRequest(text="Программа не может сама понять слова в образце: модель распознавания речи не скачана (карточка «Модель» на странице «LLM»). Впишите, что сказано в образце, вручную.")
             try:
                 text, _, _ = await speech.transcribe(self.llm.root, raws[key], "auto", self.config.get("whisper_dir"))
             except Exception as e:
@@ -6019,7 +6026,7 @@ class App:
         """Words from an audio clip (WAV from the browser) - lyrics for lipsync prompts and voice input."""
         await self.llm_variant()  # keeps llm.root in sync with the install folder
         if not self.speech_status()["ready"]:
-            return web.json_response({"error": "Распознавание речи ещё не скачано (карточка «Модель» в разделе «Агент»)."},
+            return web.json_response({"error": "Распознавание речи ещё не скачано (карточка «Модель» на странице «LLM»)."},
                                      status=400)
         wav, lang = None, "auto"
         async for field in await req.multipart():
@@ -6100,11 +6107,19 @@ class App:
             if not self.remote() and not self.llm.installed(variant):
                 raise RuntimeError("Модель агента ещё не скачана.")
             if not self.remote() and not self.llm.alive():
-                await send({"type": "status", "text": "Освобождаем видеопамять…"})
-                try:
-                    await self.comfy_json("POST", "/free", json={"unload_models": True, "free_memory": True})
+                need = ag.LLM_VARIANTS[variant]["model_size"] + ag.LLM_VARIANTS[variant].get("mmproj_size", 0) + ag.LLM_VARIANTS[variant]["ctx"] * 150e3 + 1e9
+                free_vram = 0
+                try:   # the models of ComfyUI are unloaded only when the video memory really is too small for the agent's model
+                    _s, sysd = await self.comfy_json("GET", "/system_stats", timeout=aiohttp.ClientTimeout(total=8))
+                    free_vram = float(((sysd or {}).get("devices") or [{}])[0].get("vram_free") or 0)
                 except Exception:
-                    pass
+                    free_vram = 0
+                if free_vram < need:
+                    await send({"type": "status", "text": "Освобождаем видеопамять…"})
+                    try:
+                        await self.comfy_json("POST", "/free", json={"unload_models": True, "free_memory": True})
+                    except Exception:
+                        pass
                 await send({"type": "status", "text": f'Загружаем {ag.LLM_VARIANTS[variant]["title"]}… (до минуты)'})
                 self.llm.start(variant)
                 await ag.wait_ready(self.session, self.llm)
@@ -6116,6 +6131,10 @@ class App:
             # frames cut out of a video are the last pictures of a message and are not hero pictures (Picture N)
             ctx["images"] = sum(max(0, len(m.get("images") or []) - int(m.get("frames") or 0)) for m in messages if m["role"] == "user")
             active = self.skills.active(ag.chat_text(messages), target, ctx.get("model"))
+            if target == "long" and (ctx.get("long") or {}).get("clip") and not self.remote() and ag.LLM_VARIANTS[variant]["ctx"] < 60000:
+                # the music-clip page on a local model with a small memory (under 60 thousand tokens): the acting skill (36 thousand characters) does not fit next to a long song text, so it is skipped;
+                # with Qwen (65 thousand) and with an internet model the skill stays on, so the scenes get emotions and drama
+                active = [s for s in active if s["id"] != "akterskaya-igra"]
             if target == "actor" and not any(s["id"] == "akterskaya-igra" for s in active):
                 # this mode is acting-first: its skill is always on here
                 active += [s for s in self.skills.list() if s["id"] == "akterskaya-igra" and s["mode"] != "off"]
@@ -6148,6 +6167,23 @@ class App:
                 else:
                     system += ("\n\nПоиск в интернете включён, но ничего не нашёл" + err + ". Скажи об этом пользователю и "
                                "не выдумывай свежие данные: у тебя нет интернета.")
+            if not self.remote():   # a local model has a fixed memory (tokens): old messages go first, so a long text of the user always fits
+                limit = ag.LLM_VARIANTS[variant]["ctx"]
+                est = lambda s: int(len(s or "") / 2.6) + 4   # measured on a real request: about 2.8 characters per token for Russian + the skill texts (the estimate is slightly on the careful side)
+                imgs = 800 * int(ctx.get("images") or 0)
+                budget = limit - 4500   # room for the answer
+
+                def used():
+                    return est(system) + sum(est(m.get("content")) for m in messages) + imgs
+                dropped = 0
+                while used() > budget and len(messages) > 1:
+                    messages = messages[1:]   # the oldest message goes first
+                    dropped += 1
+                if used() > budget:
+                    raise RuntimeError(f"Текст слишком большой для памяти модели Агента ({used()} из {limit}). Что делать: сократите описание (оставьте общую идею, а подробности сцен подавайте по частям: выделите кусок песни и вставьте только его сцены) "
+                                       "или подключите Агента через интернет-сервис (страница LLM): там память в десятки раз больше.")
+                if dropped:
+                    await send({"type": "status", "text": f"Память модели почти заполнена: старые сообщения чата ({dropped}) не учитываются."})
             await send({"type": "status", "text": ("Скиллы: " + ", ".join(s["name"] for s in active) + ". Думаю…") if active else "Думаю…"})   # which skills the Agent works by is visible in every status line
 
             thinking = False
@@ -6161,7 +6197,11 @@ class App:
             async with self.llm_post(payload,
                                          timeout=aiohttp.ClientTimeout(total=None, sock_read=600)) as r:
                 if r.status != 200:
-                    raise RuntimeError(llmapi.friendly_error(r.status, await r.text()) if self.remote() else f"Модель ответила ошибкой {r.status}: {(await r.text())[:300]}")
+                    body_text = await r.text()
+                    if not self.remote() and "exceed_context_size" in body_text:
+                        raise RuntimeError("Запрос не поместился в память модели Агента. Что делать: начните новый чат, отключите лишние документы и навыки проекта или сократите текст "
+                                           "(для клипа вставляйте сцены по частям). Или подключите Агента через интернет-сервис (страница LLM).")
+                    raise RuntimeError(llmapi.friendly_error(r.status, body_text) if self.remote() else f"Модель ответила ошибкой {r.status}: {body_text[:300]}")
                 async for raw in r.content:
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:") or line == "data: [DONE]":

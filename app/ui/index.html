@@ -1583,7 +1583,7 @@ img.pr-media{object-position:center 38%}
           <h1>LLM</h1>
           <p>Обычный чат с моделью: пишите, спрашивайте, придумывайте. Промпты под разделы пишет кнопка «Агент» в самих разделах</p>
         </div>
-        <button class="btn" id="agNew">Новый чат</button>
+        <button class="btn" id="agNew" title="Агент забывает всю переписку на экране: освобождает его память. Сохранённые чаты не удаляются">Очистить память Агента</button>
       </div>
       <div class="ag-grid">
         <div class="card ag-hist">
@@ -2400,14 +2400,20 @@ function showOwnProblem(s, b) {
   if (s.server_host || (s.online && !s.cpu_only)) { b.hidden = true; return; }
   const py = s.ext_python || 'python';
   const cmd = `"${py}" -s -m pip install --force-reinstall --no-deps --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130`;
-  b.innerHTML = (s.online
-    ? '<span style="flex:1 1 100%">Ваш ComfyUI работает на процессоре, а не на видеокарте: генерации будут очень медленными. Скорее всего, в нём стоит PyTorch без поддержки видеокарты.</span>'
-    : '<span style="flex:1 1 100%">Программа не видит ваш ComfyUI. Проверьте, что он запущен (окно ComfyUI открыто и в нём нет красной ошибки). Если он закрывается с ошибкой «Torch not compiled with CUDA enabled», в нём стоит PyTorch без поддержки видеокарты.</span>')
-    + '<span class="hint" style="flex:1 1 100%">Как исправить: закройте ComfyUI, вставьте эту команду в командную строку (cmd), дождитесь конца и запустите ComfyUI снова. Нужен интернет.'
-    + (s.ext_python ? '' : ' Вместо python подставьте путь к python вашего ComfyUI.') + ' Команда ставит PyTorch заново, ваши модели не затрагиваются.</span>'
-    + `<code style="flex:1 1 100%;font-size:11px;word-break:break-all;user-select:all">${esc(cmd)}</code><button class="btn mini" id="sbCopy" type="button">Скопировать команду</button>`;
+  if (window.SB_HIDE === (s.online ? 'cpu' : 'off')) { b.hidden = true; return; }   // the user closed this note
+  const hide = `<button class="btn mini" id="sbHide" type="button">Скрыть</button>`;
+  if (!s.online) {   // not reachable: it is most often simply not started yet, so no PyTorch command here
+    b.innerHTML = '<span style="flex:1">Программа не видит ваш ComfyUI. Запустите его и дождитесь, пока он загрузится (адрес можно проверить в Настройках). Эта строка исчезнет сама.</span>' + hide;
+  } else {
+    b.innerHTML = '<span style="flex:1">Ваш ComfyUI работает на процессоре, а не на видеокарте: генерации будут очень медленными. Скорее всего, в нём стоит PyTorch без поддержки видеокарты.</span>' + hide
+      + '<details style="flex:1 1 100%"><summary class="hint" style="cursor:pointer">Как исправить</summary>'
+      + '<div class="hint" style="margin:6px 0">Закройте ComfyUI, вставьте эту команду в командную строку (cmd), дождитесь конца и запустите ComfyUI снова. Нужен интернет.'
+      + (s.ext_python ? '' : ' Вместо python подставьте путь к python вашего ComfyUI.') + ' Модели не затрагиваются.</div>'
+      + `<code style="display:block;font-size:11px;word-break:break-all;user-select:all;margin-bottom:6px">${esc(cmd)}</code><button class="btn mini" id="sbCopy" type="button">Скопировать команду</button></details>`;
+    $('#sbCopy').onclick = () => { navigator.clipboard?.writeText(cmd).then(() => toast('Команда скопирована'), () => toast('Выделите команду и скопируйте вручную')); };
+  }
   b.hidden = false;
-  $('#sbCopy').onclick = () => { navigator.clipboard?.writeText(cmd).then(() => toast('Команда скопирована'), () => toast('Выделите команду и скопируйте вручную')); };
+  $('#sbHide').onclick = () => { window.SB_HIDE = s.online ? 'cpu' : 'off'; b.hidden = true; };
 }
 setInterval(() => { if (typeof ENGINE_ON !== 'undefined' && !ENGINE_ON && !document.hidden && window.MGD !== false) loadStatus(); }, 6000);
 function renderOfflineEngine() {
@@ -4873,7 +4879,7 @@ const RMODE = (() => {
     m.innerHTML = `<div class="box rme"><div class="card-h"><h3>${card ? 'Карточка' : 'Новая карточка'} Reference Mode</h3><button class="btn" data-x type="button">Закрыть</button></div>
       <div class="rme-cols"><div>
         <div class="sub-l"><span>Изображения</span></div><div class="rme-imgs"></div>
-        <div class="hint" style="margin:6px 0 14px">Загрузите несколько: лицо, в полный рост, другая одежда. Галочкой выбираете, какие изображения уходят в генерацию (например, только нужный костюм). Всего в студии не больше 5 референсов.</div>
+        <div class="hint" style="margin:6px 0 14px">Загрузите несколько: лицо, в полный рост, другая одежда. Галочкой выбираете, какие изображения уходят в генерацию (например, только нужный костюм). Всего можно до 9 референсов в Видеостудии и «Создании клипа» (в остальных разделах до 5).</div>
         <div class="sub-l"><span>Голос (необязательно)</span></div><div class="rme-voice"></div>
       </div><div class="rme-form">
         <div class="rme-f"><label>Название <small>по нему пишется @название в тексте сцены</small></label><input class="dl-in rme-name" maxlength="60" placeholder="например, Norman"></div>
@@ -4968,7 +4974,7 @@ function makeRefMode(cfg) {
         ${!cfg.swap ? '<div class="rmb"></div>' : ''}
       </div>
       <div class="card">
-        <div class="card-h"><h3><span class="n">2</span>Промпт</h3><span class="hint">можно написать в разделе «Агент»</span></div>
+        <div class="card-h"><h3><span class="n">2</span>Промпт</h3><span class="hint">можно написать кнопкой «Агент» над полем</span></div>
         <textarea class="rm-prompt" placeholder="${cfg.placeholder}"></textarea>
         <div class="ta-foot"><div class="tokens rm-tokens"></div><span class="hint">нажмите, чтобы вставить</span></div>
       </div>
@@ -5078,7 +5084,7 @@ function makeRefMode(cfg) {
   const promptEl = () => $('.rm-prompt', root) || (cfg.scenes ? ($$('.sc textarea', root).find(t => t.value.trim()) || $('.sc textarea', root)) : (root._ta || $('.sc textarea', root)));   // video studio: the first scene that has a text (the focused field may be a stale one)
   if (cfg.swap) {   // beginner form: who to replace instead of a prompt; the program writes the prompt itself
     const card = $('.rm-prompt', root).closest('.card');
-    card.innerHTML = `<div class="card-h"><h3><span class="n">2</span>Промпт</h3><span class="hint">можно написать в разделе «Агент»</span></div>
+    card.innerHTML = `<div class="card-h"><h3><span class="n">2</span>Промпт</h3><span class="hint">можно написать кнопкой «Агент» над полем</span></div>
       <textarea class="rm-prompt" placeholder="Напишите обычным промптом, кого на кого заменить. Например: Replace the man in the white shirt in <Video 1> with the character from <Picture 1>. Keep the background, camera and movements of the video."></textarea>
       <div class="ta-foot"><div class="tokens rm-tokens"></div><button class="btn sw-example" type="button" style="padding:3px 10px;font-size:12px">Вставить пример</button></div>
       <div class="hint" style="margin-top:6px">Изображения называются <b>Picture 1</b>, <b>Picture 2</b> (по порядку слотов), видео — <b>Video 1</b>. Если оставить пустым, программа сама заменит главного человека в видео на героя с первого изображения.</div>
@@ -5138,7 +5144,7 @@ function makeRefMode(cfg) {
       <button class="btn" type="button" id="lmAdd" style="margin-top:10px">+ Добавить сцену</button>
       <label class="btn" style="margin-top:10px;cursor:pointer" title="Видео, сделанное в другом месте: возьмём его последние кадры, и первая сцена продолжит их">Продолжить своё видео с компьютера…<input type="file" accept="video/*" class="lm-srcfile" hidden></label>
       <div class="ta-foot"><div class="tokens rm-tokens"></div><span class="hint">нажмите, чтобы вставить в сцену</span></div>
-      <div class="note" style="margin-top:12px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h0M11 12h1v5h1"/></svg><span>Изображения героя необязательны: без них ролик строится только по тексту (например, про Древний Рим). Сцены идут одна за другой, каждая продолжает прошлую: герой, место и звук переходят дальше. Но при каждом продолжении изображение немного портится, поэтому при смене плана или места ставьте у сцены галочку «Новый план»: она строится заново по вашим изображениям, и качество остаётся как в первой сцене. В каждой сцене опишите героя, что он делает и как движется камера. Длину сцены задаёт ползунок. Текст сцены можно составить в разделе «Агент».</span></div>`;
+      <div class="note" style="margin-top:12px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h0M11 12h1v5h1"/></svg><span>Изображения героя необязательны: без них ролик строится только по тексту (например, про Древний Рим). Сцены идут одна за другой, каждая продолжает прошлую: герой, место и звук переходят дальше. Но при каждом продолжении изображение немного портится, поэтому при смене плана или места ставьте у сцены галочку «Новый план»: она строится заново по вашим изображениям, и качество остаётся как в первой сцене. В каждой сцене опишите героя, что он делает и как движется камера. Длину сцены задаёт ползунок. Текст сцены можно составить кнопкой «Агент» над полем.</span></div>`;
     const c1 = $('.rm-imgs', root).closest('.card');
     $('h3', c1).innerHTML = '<span class="n">1</span>Референсы';
     $('.rm-count', root).hidden = true;
@@ -5376,7 +5382,7 @@ function makeRefMode(cfg) {
       const okQ = v => QUALITY_ALL.some(x => x.id === v) ? v : '720p';   // a broken saved value (a mode name instead of a size) must not get through
       Object.assign(S, { aspect: ASPECTS.some(a => a.id === p.aspect) ? p.aspect : S.aspect, q: okQ(p.q || S.q), cw: p.cw || 0, ch: p.ch || 0 });
       $$('.ref .x', imgsEl).forEach(x => x.click());
-      for (let i = 0; i < 5; i++) await putInto($$('.ref input', imgsEl)[i], await getRef('img' + i));
+      for (let i = 0; i < (cfg.maxImages || 5); i++) await putInto($$('.ref input', imgsEl)[i], await getRef('img' + i));
       const slotA = $('.rm-auds .slot', root); $('.x', slotA)?.click();
       const aud = await getRef('aud0'); if (aud instanceof File) await putInto($('input', slotA), aud);
       setSnd(p.snd || 'none'); $('.lm-start', root).value = p.start || '0'; $('.lm-vocals', root).checked = !!p.vocals;
@@ -6209,7 +6215,7 @@ function makeRefMode(cfg) {
       card.innerHTML = `<div class="card-h"><h3><span class="n">4</span>Клип</h3><span style="flex:1"></span><button class="btn mini clip-recent" type="button" title="Недавние проекты этой страницы: сцены и готовые клипы восстановятся">🕘 Недавние проекты</button><button class="btn mini clip-new" type="button" title="Очистить страницу целиком и начать с чистого листа">🗑 Новый проект</button><button class="btn mini clip-prompts" type="button" title="Тексты всех сцен (промпты) в обычный текстовый файл: можно положить в папку клипа">📝 Сохранить промпты</button><button class="btn mini clip-save" type="button" title="Весь проект одним файлом: сцены, тексты, метки, изображения, музыка, выделение и готовые сцены. Файл можно сохранить в папку клипа или перенести на другой компьютер">💾 Сохранить проект</button><label class="btn mini clip-load" style="cursor:pointer" title="Открыть проект, сохранённый раньше (на этом или другом компьютере)">📂 Загрузить проект<input type="file" accept=".h3clip,.zip" hidden></label></div>
         <div class="sub-l" style="margin-top:6px"><span>Шаг 1. О чём весь клип <small style="font-weight:400">(один раз на всю песню)</small></span></div>
         <textarea class="clip-all" style="min-height:70px" placeholder="Сюжет, настроение, герои, стиль всего клипа. Например: девушка в красном платье путешествует по разным местам, мягкий закатный свет."></textarea>
-        <div class="sub-l" style="margin-top:12px"><span>Выделите кусок трека на волне выше и нажмите кнопку <small style="font-weight:400">(можно всю песню, если до 2 минут)</small></span></div>
+        <div class="sub-l" style="margin-top:12px"><span>Выделите кусок трека на волне выше и нажмите кнопку <small style="font-weight:400">(можно всю песню: Агент сам разобьёт её на части)</small></span></div>
         <div class="clip-range hint" style="margin:2px 0 6px"></div>
         <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:6px 0 4px">${scLimitsHtml('clip-min', 'clip-len', 'clip-cnt', 4, 10)}
         <button class="btn pri clip-agent" type="button" title="Агент послушает выделенный кусок, сам решит, где какая сцена (в пределах выбранных длин и числа сцен), и напишет промпт для каждой">Агент: разделить на сцены</button>
@@ -6931,6 +6937,7 @@ function makeRefMode(cfg) {
     const setSnd = v => {
       if (cfg.clip) v = 'own';   // the clip mode always works with a music track
       if (cfg.kind) v = 'none';   // the action studio has no own track: the audio slots under the pictures are samples
+      if (cfg.scenes && !cfg.kind && !cfg.clip) v = 'none';   // the Video studio has no «Sound» block (it is hidden): an old saved project must not leave «own audio» switched on, nobody could switch it off
       root._snd = v; $$('.lm-snd button', root).forEach(b => b.classList.toggle('on', b.dataset.s === v));
       $('.lm-own', root).hidden = v !== 'own'; $('.lm-snd-hint', root).textContent = HINT[v]; recount();
     };
@@ -7046,7 +7053,7 @@ function makeRefMode(cfg) {
       if (!(rmRef && u.ent.vid)) n += u.ent.imgs.length; if (u.ent.voice && rmVoice) a++;
     }
     const own = $$('.ref.filled', imgsEl).length;
-    if (own + n > (cfg.maxImages || 5)) return `Референсов не больше ${cfg.maxImages || 5}: своих ${own} и из Reference Mode ${n}. Уберите лишние или выключите галочки у изображений в карточках`;
+    if (own + n > (cfg.maxImages || 5)) return `Референсов не больше ${cfg.maxImages || 5}, а сейчас ${own + n}: своих изображений ${own} и ${n} из героев Reference Mode (герои тоже считаются референсами). Уберите лишние картинки или выключите галочки у изображений в карточках героев`;
     if (a > 3) return 'Аудио-образцов не больше 3: уберите лишний голос или свой образец';
     if (!cfg.scenes && !cfg.kind && a > 1 && cfg.mode === 'actor') return 'В Актёрской игре один образец голоса: уберите свой образец или голос карточки';
     return '';
@@ -7430,7 +7437,7 @@ const RM = {
   actor: makeRefMode({
     mode: 'actor', title: 'Актёрская игра', pill: 'Singularity Ref2V · 10 шагов', dur: 14, maxImages: 3, videos: false,
     sub: 'Диалоги и крупные планы: актёрская игра, эмоции и голос по образцу — лучше всего для реализма',
-    refHint: 'Первое изображение — стартовый кадр видео (его композиция сохранится). Аудио — образец голоса: из него берётся только тембр и манера, а слова произносятся новые, из вашего промпта. Нужны два голоса — запишите оба в одно аудио. Промпт удобно писать в разделе «Агент» (цель «Актёрская игра»).',
+    refHint: 'Первое изображение — стартовый кадр видео (его композиция сохранится). Аудио — образец голоса: из него берётся только тембр и манера, а слова произносятся новые, из вашего промпта. Нужны два голоса — запишите оба в одно аудио. Промпт удобно писать кнопкой «Агент» над полем.',
     placeholder: '@image1 - keyframe, first frame of the target video… Лучше всего писать в «Агенте»: он знает формат этого режима',
   }),
   swap: makeRefMode({
@@ -7440,13 +7447,13 @@ const RM = {
     placeholder: '',
   }),
   long: makeRefMode({
-    mode: 'long', title: 'Видеостудия', pill: 'Сцены подряд · Pika', dur: 20, maxImages: 5, videos: false, scenes: true,
+    mode: 'long', title: 'Видеостудия', pill: 'Сцены подряд · Pika', dur: 20, maxImages: 9, videos: false, scenes: true,
     sub: 'Клипы и ролики по сценам: каждая сцена до 15 секунд и продолжает прошлую. Можно с музыкой, можно без',
     refHint: 'До 5 изображений-референсов: персонаж, локация, предмет, одежда, стиль — всё, что должно сохраняться. Они подаются в каждую сцену, поэтому лицо и место не «плывут». В тексте сцены ссылайтесь на них как &lt;Picture 1&gt;, &lt;Picture 2&gt;… Чем больше референсов, тем тяжелее и дольше считается сцена.',
     placeholder: '',
   }),
   clip: makeRefMode({
-    mode: 'clip', api: 'long', jobMode: 'long', clip: true, title: 'Создание клипа', pill: 'Музыка → сцены · Pika', dur: 20, maxImages: 5, videos: false, scenes: true,
+    mode: 'clip', api: 'long', jobMode: 'long', clip: true, title: 'Создание клипа', pill: 'Музыка → сцены · Pika', dur: 20, maxImages: 9, videos: false, scenes: true,
     sub: 'Клип под вашу музыку: Агент разделит трек на сцены нужной длины и напишет промпт для каждой. Сцены считаются как в Видеостудии',
     refHint: 'До 5 изображений-референсов: персонаж, локация, стиль. Или выберите героев из карточек Reference Mode и пишите в сцене @имя. Они подаются в каждую сцену, поэтому лицо и место не «плывут».',
     placeholder: '',
@@ -10964,7 +10971,7 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
           <button class="go kr-bgo" type="button" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg><span>Сгенерировать</span></button>
           <div class="status kr-bstatus" style="margin-top:6px"></div>
         </div>
-        <div class="ta-foot"><span class="hint">Лучше писать подробно, одним абзацем. Помощник в разделе «Агент» умеет писать такие промпты</span></div></div>
+        <div class="ta-foot"><span class="hint">Лучше писать подробно, одним абзацем. Кнопка «Агент» над полем умеет писать такие промпты</span></div></div>
       <div class="card"><div class="card-h"><h3><span class="n">2</span>Параметры</h3></div>
         <div class="row"><div class="row-l">Модель</div>
           <div class="seg kr-eng" style="grid-template-columns:repeat(2,1fr)"><button data-e="krea">Krea 2<small>лучшее качество, можно в коммерцию</small></button><button data-e="h3img">MiniMax H3 Image<small>очень высокое разрешение, до 16 МП, открытая лицензия</small></button><button data-e="flux">FLUX.2 klein<small>можно в коммерцию</small></button><button data-e="qwen">Qwen 2.1<small>текст на изображении, не для коммерции</small></button></div>
@@ -10972,7 +10979,7 @@ const imgSeedForm = (S, fd) => { if (S.seedFixed && S.seed) fd.append('seed', S.
           <div class="hint" style="margin-top:6px">Лицензии: <b>Krea 2</b> и <b>FLUX.2 klein</b> можно использовать в коммерции (Krea 2 — если годовой доход компании меньше 1 млн $). <b>MiniMax H3 Image</b> — открытая лицензия сообщества: коммерческое использование допускается при годовом доходе до 1 млн $ и без хостинга для других, не во всех странах (не действует в США, ЕС, Великобритании и Южной Корее); в коммерческом продукте нужно указывать название «MiniMax-H3-Image». <b>Qwen 2.1</b> только для творчества, не для коммерции.</div></div>
         <div class="row kr-h3mp" hidden><div class="row-l">Размер результата <span class="hint">4 МП — нижний предел модели: картинка получается с зерном. Чисто от 8 МП, лучше всего 16 МП</span></div>
           <div class="seg" style="grid-template-columns:repeat(3,1fr)"><button data-mp="4">4 МП<small>быстро, но с зерном (для проб)</small></button><button data-mp="8">8 МП<small>чище, ~1 минута</small></button><button data-mp="16">16 МП<small>лучшее качество, ~2 минуты</small></button></div>
-          <div class="hint" style="margin-top:6px">Пишите промпт подробно и по-английски: агент в разделе «Агент» умеет (цель «MiniMax H3 Image: по тексту»). Негативный промпт у модели не работает.</div></div>
+          <div class="hint" style="margin-top:6px">Пишите промпт подробно и по-английски: кнопка «Агент» над полем умеет писать такой промпт. Негативный промпт у модели не работает.</div></div>
         <div class="row kr-neg" hidden><div class="row-l">Негативный промпт <span class="hint">что не должно быть на изображении</span></div>
           <textarea class="kr-negtxt" rows="2" placeholder="Пусто — быстрее и легче для видеокарты. Если нужно, впишите, например: blurry, low quality, extra fingers, text, watermark"></textarea><div class="hint" style="margin-top:4px">Негативный промпт замедляет Qwen примерно вдвое и требует больше видеопамяти. Заполняйте, только если без него не получается.</div></div>
         <div class="row kr-stylerow"><div class="row-l">Стиль</div>
