@@ -1,0 +1,369 @@
+{
+ "99": {
+  "inputs": {
+   "image": "example.png"
+  },
+  "class_type": "LoadImage",
+  "_meta": {
+   "title": "Load Image",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "104": {
+  "inputs": {
+   "viewport_state": {},
+   "width": 1024,
+   "height": 1024,
+   "model_3d": [
+    "107:103",
+    0
+   ]
+  },
+  "class_type": "Preview3DAdvanced",
+  "_meta": {
+   "title": "RESULT",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "106": {
+  "inputs": {
+   "value": 232
+  },
+  "class_type": "PrimitiveInt",
+  "_meta": {
+   "title": "seed",
+   "cnr_id": "comfy-core",
+   "ver": "0.46.0"
+  }
+ },
+ "116": {
+  "inputs": {
+   "autosave": false,
+   "format": "fbx",
+   "filename_prefix": "TripoSplat_3D",
+   "folder": "",
+   "save_units": "mm",
+   "input_units": "m",
+   "mesh": [
+    "107:102",
+    0
+   ]
+  },
+  "class_type": "SSave3D",
+  "_meta": {
+   "title": "Save 3D"
+  }
+ },
+ "107:2": {
+  "inputs": {
+   "erode_radius": 1,
+   "size": 1024,
+   "image": [
+    "99",
+    0
+   ],
+   "mask": [
+    "107:85:81",
+    0
+   ]
+  },
+  "class_type": "TripoSplatPreprocessImage",
+  "_meta": {
+   "title": "TripoSplat Preprocess Image",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:6": {
+  "inputs": {
+   "seed": [
+    "106",
+    0
+   ],
+   "steps": 20,
+   "cfg": 3,
+   "sampler_name": "dpmpp_2m",
+   "scheduler": "simple",
+   "denoise": 1,
+   "model": [
+    "107:16",
+    0
+   ],
+   "positive": [
+    "107:24",
+    0
+   ],
+   "negative": [
+    "107:24",
+    1
+   ],
+   "latent_image": [
+    "107:24",
+    2
+   ]
+  },
+  "class_type": "KSampler",
+  "_meta": {
+   "title": "KSampler",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:7": {
+  "inputs": {
+   "clip_name": "3D\\dino_v3_vit_h.safetensors"
+  },
+  "class_type": "CLIPVisionLoader",
+  "_meta": {
+   "title": "Load CLIP Vision",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:8": {
+  "inputs": {
+   "vae_name": "3D\\flux2-vae.safetensors"
+  },
+  "class_type": "VAELoader",
+  "_meta": {
+   "title": "Load VAE",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:11": {
+  "inputs": {
+   "vae_name": "3D\\triposplat_vae_decoder_fp16.safetensors"
+  },
+  "class_type": "VAELoader",
+  "_meta": {
+   "title": "Load VAE",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:16": {
+  "inputs": {
+   "unet_name": "3D\\triposplat_fp16.safetensors",
+   "weight_dtype": "default"
+  },
+  "class_type": "UNETLoader",
+  "_meta": {
+   "title": "Load Diffusion Model",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:24": {
+  "inputs": {
+   "clip_vision": [
+    "107:7",
+    0
+   ],
+   "vae": [
+    "107:8",
+    0
+   ],
+   "image": [
+    "107:2",
+    0
+   ]
+  },
+  "class_type": "TripoSplatConditioning",
+  "_meta": {
+   "title": "TripoSplat Conditioning",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:55": {
+  "inputs": {
+   "num_gaussians": 262144,
+   "seed": [
+    "106",
+    0
+   ],
+   "samples": [
+    "107:6",
+    0
+   ],
+   "vae": [
+    "107:11",
+    0
+   ]
+  },
+  "class_type": "VAEDecodeTripoSplat",
+  "_meta": {
+   "title": "TripoSplat Decode",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:76": {
+  "inputs": {
+   "resolution": 384,
+   "kernel": 8,
+   "smooth": 0,
+   "level": 0.05,
+   "min_component": 500,
+   "min_opacity": 0.02,
+   "color_sharpen": 2,
+   "solid": true,
+   "fill": 20,
+   "splat": [
+    "107:55",
+    0
+   ]
+  },
+  "class_type": "SplatToMesh",
+  "_meta": {
+   "title": "Extract Mesh from Splat",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:85:81": {
+  "inputs": {
+   "bg_removal_model": [
+    "107:85:82",
+    0
+   ],
+   "image": [
+    "99",
+    0
+   ]
+  },
+  "class_type": "RemoveBackground",
+  "_meta": {
+   "title": "Remove Background",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:85:82": {
+  "inputs": {
+   "bg_removal_name": "3D\\birefnet.safetensors"
+  },
+  "class_type": "LoadBackgroundRemovalModel",
+  "_meta": {
+   "title": "Load Background Removal Model",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:85:83": {
+  "inputs": {
+   "mask": [
+    "107:85:81",
+    0
+   ]
+  },
+  "class_type": "InvertMask",
+  "_meta": {
+   "title": "Invert Mask",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:85:84": {
+  "inputs": {
+   "image": [
+    "99",
+    0
+   ],
+   "alpha": [
+    "107:85:83",
+    0
+   ]
+  },
+  "class_type": "JoinImageWithAlpha",
+  "_meta": {
+   "title": "Join Image with Alpha",
+   "cnr_id": "comfy-core",
+   "ver": "0.22.0"
+  }
+ },
+ "107:100": {
+  "inputs": {
+   "resolution": 512,
+   "sign_mode": "solid",
+   "sign_mode.fill": 20,
+   "sign_mode.qef": false,
+   "band": 0.5,
+   "project_back": 0,
+   "fix_poles": false,
+   "smooth_iters": 20,
+   "drop_small_components": 0.01,
+   "precluster_max_verts": 20000000,
+   "mesh": [
+    "107:76",
+    0
+   ]
+  },
+  "class_type": "RemeshMesh",
+  "_meta": {
+   "title": "Remesh Mesh (Narrow-Band DC)",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "107:101": {
+  "inputs": {
+   "target_face_count": 200000,
+   "placement_mode": "midpoint",
+   "mesh": [
+    "107:100",
+    0
+   ]
+  },
+  "class_type": "DecimateMesh",
+  "_meta": {
+   "title": "Decimate Mesh",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "107:102": {
+  "inputs": {
+   "crease_angle": 30,
+   "mesh": [
+    "107:101",
+    0
+   ]
+  },
+  "class_type": "MeshSmoothNormals",
+  "_meta": {
+   "title": "Smooth Mesh Normals",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "107:103": {
+  "inputs": {
+   "mesh": [
+    "107:117",
+    0
+   ]
+  },
+  "class_type": "MeshToFile3D",
+  "_meta": {
+   "title": "Create 3D File (from Mesh)",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "107:117": {
+  "inputs": {
+   "mesh": [
+    "107:102",
+    0
+   ]
+  },
+  "class_type": "SMeshClay",
+  "_meta": {
+   "title": "Mesh Clay"
+  }
+ }
+}

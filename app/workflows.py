@@ -1,3 +1,4 @@
+import copy
 """ComfyUI API graphs for Minimax H3 Workspace modes.
 
 Each builder returns (graph, stages): the API-format prompt and a map
@@ -123,6 +124,45 @@ def _refs(g, cond_node, images, videos=(), audios=(), base=100, vsize=None):
         inputs[f"ref_audios.ref_audio_{i}"] = [nid, 0]
     return [str(base + i) for i in range(len(images[:9]))] + [str(base + 10 + i) for i in range(len(videos[:3]))] \
         + [str(base + 20 + i) for i in range(len(audios[:3]))]
+
+
+def tune_sampling(g, cfg=None, steps=None):
+    """The user's own CFG / steps for a picture graph (None = as the graph has it). Only the main pass (denoise 1): the second pass of
+    Krea Real keeps its own. CFG goes to KSampler and CFGGuider (a BasicGuider has no CFG: MiniMax H3 Image takes only the steps)."""
+    for v in g.values():
+        ct, inp = v.get("class_type"), v.get("inputs", {})
+        if ct == "KSampler" and float(inp.get("denoise", 1) or 1) >= 0.99:
+            if cfg is not None:
+                inp["cfg"] = cfg
+            if steps is not None:
+                inp["steps"] = steps
+        elif ct == "CFGGuider" and cfg is not None:
+            inp["cfg"] = cfg
+        elif ct in ("BasicScheduler", "Flux2Scheduler") and steps is not None and float(inp.get("denoise", 1) or 1) >= 0.99:
+            inp["steps"] = steps
+    return g
+
+
+def add_loras(g, loras):
+    """The user's own LoRAs for a picture graph: a LoraLoaderModelOnly stack right after the main model (the first UNETLoader);
+    every node that took the model from the loader now takes it from the end of the stack. `loras` = [(file, strength)]."""
+    if not loras:
+        return g
+    uid = next((k for k, v in g.items() if v.get("class_type") == "UNETLoader"), None)
+    if uid is None:
+        return g
+    prev = [uid, 0]
+    for i, (name, strength) in enumerate(loras):
+        nid = f"own-lora-{i}"
+        g[nid] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": prev, "lora_name": name, "strength_model": strength}}
+        prev = [nid, 0]
+    for k, v in g.items():
+        if k.startswith("own-lora-"):
+            continue
+        for key, val in v.get("inputs", {}).items():
+            if isinstance(val, list) and len(val) == 2 and val[0] == uid and val[1] == 0:
+                v["inputs"][key] = prev
+    return g
 
 
 def _lora_chain(g, start, loras, base=60):
@@ -468,6 +508,30 @@ def _color_nodes(g, base, look, ref_name):
             g[name] = {"class_type": cls, "inputs": {field: base, "factor": round(min(2.0, max(0.0, float(v))), 3)}}
             ids.append(name)
             base = [name, 0]
+    # levels, all three sliders: 0 in the middle, left = darker, right = lighter (as in photo editors), -100..100.
+    # black: left crushes the shadows (levels node), right lifts them (a white layer); white: right brightens (levels node), left dims (a black layer); mid: right = lighter
+    ub, uw, um = float(look.get("black") or 0), float(look.get("white") or 0), float(look.get("lmid") or 0)
+    lb, lw, lm = max(0.0, -ub) * 1.2, 255.0 - max(0.0, uw) * 1.2, um
+    if lb > 0.5 or lw < 254.5 or abs(lm) > 0.5:
+        g["LV"] = {"class_type": "Image Levels Adjustment", "inputs": {"image": base, "black_level": round(lb, 1), "white_level": round(lw, 1),
+                                                                      "mid_level": round(lb + (lw - lb) * (0.5 - 0.3 * lm / 100.0), 1)}}
+        ids.append("LV")
+        base = ["LV", 0]
+    for tag, v, col in (("LF", ub, 0xFFFFFF), ("LD", -uw, 0x000000)):   # lifted blacks / dimmed whites: a flat layer over the frames
+        if v > 0.5:
+            g[tag + "E"] = {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": col}}
+            g[tag + "B"] = {"class_type": "ImageBlend", "inputs": {"image1": base, "image2": [tag + "E", 0], "blend_factor": round(v * 0.0025, 4), "blend_mode": "normal"}}
+            ids += [tag + "E", tag + "B"]
+            base = [tag + "B", 0]
+    # white balance: temperature (cold .. warm) and tint (green .. magenta) are a soft colour layer over the frames (core nodes EmptyImage + ImageBlend)
+    for key, pos, neg, tag in (("temp", 0xFFB347, 0x4C8DFF, "WT"), ("tint", 0xFF5FD2, 0x4CFF6A, "WH")):
+        v = float(look.get(key) or 0)
+        if abs(v) > 0.5:
+            g[tag + "E"] = {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": pos if v > 0 else neg}}
+            g[tag + "B"] = {"class_type": "ImageBlend", "inputs": {"image1": base, "image2": [tag + "E", 0],
+                                                                    "blend_factor": round(min(1.0, abs(v) / 100.0) * 0.4, 3), "blend_mode": "overlay"}}
+            ids += [tag + "E", tag + "B"]
+            base = [tag + "B", 0]
     return base, ids
 
 
@@ -867,12 +931,23 @@ def long_graph(m, scenes, width, height, seed, images, audio=None, start=0.0, pi
     return g, stages
 
 
+ANCHOR_TOKENS = 6   # tokens at the end of a redone scene kept as they were (~0.8 s): enough to keep the pose and the motion at the join; the rest is free for the new prompt
+
+
+def can_anchor(total, ov, next_ov):
+    """Is the scene long enough to hold the frozen end of its old version: the tokens of the next scene's overlap at the end, those of its own
+    overlap at the start (`ov` = 0: it starts a shot) and a free middle for the new action."""
+    return next_ov > 0 and _tokens(total) - (_tokens(ov) if ov else 0) - min(ANCHOR_TOKENS, _tokens(next_ov)) >= 4
+
+
 LONG_STATE_TOKENS = 17   # latent tokens of the last second(s) of a scene that the next scene continues from
 
 
 def long_part_graph(m, scenes, k, width, height, seed, images, audio=None, start=0.0, pika=None, extra_loras=(),
-                    ref_size="match", vocals=None, state=None, preview=None, src=None, cont_plan=False, fresh=(), draft=False, videos=(), quiet=False, audios=()):
-    """Scene number `k` (0-based) of the long video as its own job. Scene 0 starts fresh; scene k > 0 continues from the saved
+                    ref_size="match", vocals=None, state=None, preview=None, src=None, cont_plan=False, fresh=(), draft=False, videos=(), quiet=False, audios=(),
+                    end_state=None):
+    """Scene number `k` (0-based) of the long video as its own job. `end_state`: the saved tail of the OLD version of this scene: its end is
+    kept as it was (frozen in the latent), so the next scene, made from that tail, still joins this one when only this scene is redone. Scene 0 starts fresh; scene k > 0 continues from the saved
     latent tail of scene k-1 (`state`, a .latent file in ComfyUI's input folder). The clip it saves has the overlap with the
     previous scene cut off, so the clips join end to end. Also saves the tail of its own latent for scene k+1."""
     g, model, sched, sampler_name, steps = _long_base(m, pika, extra_loras, draft)
@@ -921,8 +996,36 @@ def long_part_graph(m, scenes, k, width, height, seed, images, audio=None, start
         a_lat = [add("SetLatentNoiseMask", samples=[enc, 0], mask=[amask, 0]), 0]
     else:
         a_lat = [new, 1]
+    t_ov, t_tot = _tokens(ov), _tokens(total)
+    next_ov = plan[k + 1]["ov"] if k + 1 < len(plan) else 0
+    t_end = min(ANCHOR_TOKENS, _tokens(next_ov)) if next_ov else 0
+    anchor = bool(end_state) and can_anchor(total, 0 if ((k == 0 and not cont) or new_shot) else ov, next_ov)
+
+    def with_end(front, n_front, black_front):
+        """`front` (a latent of n_front tokens, the first black_front of them kept) + the frozen end of the old version: t_tot tokens in all."""
+        lw, lh = round(width / 16), round(height / 16)
+        if anchor:
+            fin = add("LoadLatent", latent=end_state)
+            stages[fin] = "load"
+            fcut = add("LatentCut", samples=[fin, 0], dim="t", index=-t_end, amount=t_end)   # the same tokens the next scene continues from
+            head = add("LatentCut", samples=front, dim="t", index=0, amount=t_tot - t_end)
+            lat_v = [add("LatentConcat", samples1=[head, 0], samples2=[fcut, 0], dim="t"), 0]
+        else:
+            lat_v = [add("LatentCut", samples=front, dim="t", index=0, amount=t_tot), 0]
+        parts = []
+        if black_front:
+            parts.append(add("EmptyImage", width=lw, height=lh, batch_size=black_front, color=0))
+        parts.append(add("EmptyImage", width=lw, height=lh, batch_size=max(1, t_tot - black_front - (t_end if anchor else 0)), color=16777215))
+        if anchor:
+            parts.append(add("EmptyImage", width=lw, height=lh, batch_size=t_end, color=0))
+        both = parts[0]
+        for q in parts[1:]:
+            both = add("ImageBatch", image1=[both, 0], image2=[q, 0])
+        vmask = add("ImageToMask", image=[both, 0], channel="red")
+        return [add("SetLatentNoiseMask", samples=lat_v, mask=[vmask, 0]), 0]
+
     if (k == 0 and not cont) or new_shot:
-        v_lat = [new, 0]
+        v_lat = with_end([new, 0], t_tot, 0) if anchor else [new, 0]
     else:
         if cont:   # the tail of the existing video, encoded back into a latent
             vid_in = add("LoadVideo", file=src[0])
@@ -933,16 +1036,9 @@ def long_part_graph(m, scenes, k, width, height, seed, images, audio=None, start
             stages.update({vid_in: "encode", comp: "encode", last: "encode", fit: "encode", old: "encode"})
         else:
             old = add("LoadLatent", latent=state)
-        t_ov, t_tot = _tokens(ov), _tokens(total)
         cut = add("LatentCut", samples=[old, 0], dim="t", index=-t_ov, amount=t_ov)
         cat = add("LatentConcat", samples1=[cut, 0], samples2=[new, 0], dim="t")
-        cut2 = add("LatentCut", samples=[cat, 0], dim="t", index=0, amount=t_tot)
-        lw, lh = round(width / 16), round(height / 16)
-        black = add("EmptyImage", width=lw, height=lh, batch_size=t_ov, color=0)
-        white = add("EmptyImage", width=lw, height=lh, batch_size=max(1, t_tot - t_ov), color=16777215)
-        both = add("ImageBatch", image1=[black, 0], image2=[white, 0])
-        vmask = add("ImageToMask", image=[both, 0], channel="red")
-        v_lat = [add("SetLatentNoiseMask", samples=[cut2, 0], mask=[vmask, 0]), 0]
+        v_lat = with_end([cat, 0], t_tot, t_ov)
         stages[old] = "load"
     lat = add("LTXVConcatAVLatent", video_latent=v_lat, audio_latent=a_lat)
     noise = add("RandomNoise", noise_seed=seed + 100 * k)
@@ -1526,18 +1622,18 @@ def h3img_edit_graph(m, prompt, images, megapixels, seed, size=None, ref_mp=None
         if i == 0:
             src = rid
             if ref_mp != megapixels:   # the size of the result comes from the same picture at the bigger area
-                g["219"] = {"class_type": "ResizeImageMaskNode", "inputs": {
+                g["h3img-edit-size-source"] = {"class_type": "ResizeImageMaskNode", "inputs": {
                     "resize_type": "scale total pixels", "resize_type.megapixels": megapixels, "scale_method": "area", "input": [lid, 0]}}
-                src = "219"
-                stages["219"] = "encode"
-            g["220"] = {"class_type": "ResizeImageMaskNode", "inputs": {
+                src = "h3img-edit-size-source"
+                stages["h3img-edit-size-source"] = "encode"
+            g["h3img-edit-size-aligned"] = {"class_type": "ResizeImageMaskNode", "inputs": {
                 "resize_type": "scale to multiple", "resize_type.multiple": 32, "scale_method": "area", "input": [src, 0]}}
-            g["221"] = {"class_type": "GetImageSize", "inputs": {"image": ["220", 0]}}
-            last = "220" if ref_mp == megapixels else rid   # the model gets the picture at `ref_mp`
-            stages.update({"220": "encode", "221": "encode"})
+            g["h3img-edit-size-dimensions"] = {"class_type": "GetImageSize", "inputs": {"image": ["h3img-edit-size-aligned", 0]}}
+            last = "h3img-edit-size-aligned" if ref_mp == megapixels else rid   # the model gets the picture at `ref_mp`
+            stages.update({"h3img-edit-size-aligned": "encode", "h3img-edit-size-dimensions": "encode"})
         cond[f"images.image_{i}"] = [last, 0]
         stages.update({lid: "encode", rid: "encode"})
-    cond["width"], cond["height"] = (size[0], size[1]) if size else (["221", 0], ["221", 1])
+    cond["width"], cond["height"] = (size[0], size[1]) if size else (["h3img-edit-size-dimensions", 0], ["h3img-edit-size-dimensions", 1])
     g.update({
         "5": {"class_type": "MiniMaxH3ImageConditioning", "inputs": cond},
         "6": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["5", 0]}},
@@ -1561,10 +1657,10 @@ def h3img_tags(text):
     return re.sub(r"<image\s*(\d)>", r"<Picture \1>", text)
 
 
-def h3img_sheet_graph(m, image, seed, headless=True, background="grey", marks="", panels=4, mp=None):
+def h3img_sheet_graph(m, image, seed, headless=True, background="grey", marks="", panels=4, mp=None, desc=""):
     """Character sheet from one picture on MiniMax H3 Image (the same sheet text as for Qwen, tags <Picture 1>).
     `mp`: area of the whole sheet in megapixels (the panels share it: a sheet needs 8-16 MP to look clean)."""
-    prompt = h3img_tags(sheet_prompt(headless, background, marks, panels))
+    prompt = h3img_tags(sheet_prompt(headless, background, marks, panels, desc))
     size = h3img_size("11:5" if panels == 6 else "16:9", mp) if mp else (H3IMG_SHEET6_SIZE if panels == 6 else H3IMG_SHEET_SIZE)
     g, stages = h3img_edit_graph(m, prompt, [image], 2.0, seed, size)
     return g, stages, prompt
@@ -1988,7 +2084,7 @@ def qwen_outpaint_graph(m, prompt, canvas, orig, x, y, size, seed, outpaint_lora
     return g, stages
 
 
-def sheet_prompt(headless=True, background="grey", marks="", panels=4):
+def sheet_prompt(headless=True, background="grey", marks="", panels=4, desc=""):
     """Four panels: full body front (without the head by default), full body back, close-up front, close-up profile.
     Tested on Qwen Image 2.1 with a cartoon character: same style and outfit on all panels."""
     bg = SHEET_BG.get(background, "light grey")
@@ -1997,8 +2093,15 @@ def sheet_prompt(headless=True, background="grey", marks="", panels=4):
              "showing the whole outfit from the neckline to the shoes." if headless else
              "full-body front view facing the viewer, standing in a relaxed neutral pose, showing the whole outfit "
              "from head to shoes.")
-    keep = "Keep the same face, hairstyle, " + (marks.strip().rstrip(".,") + ", " if marks.strip() else "") \
-        + "clothing, colors, proportions and art style as in <image1> in every panel."
+    desc = (desc or "").strip()
+    if desc:   # the user describes the outfit / details: they win over what the picture shows
+        keep = ("Keep the same face, hairstyle, " + (marks.strip().rstrip(".,") + ", " if marks.strip() else "")
+                + "proportions and art style as in <image1> in every panel. "
+                + "The outfit and details, identical on every panel, follow this description and replace the clothing of <image1> where they differ: "
+                + desc.rstrip(".") + ".")
+    else:
+        keep = "Keep the same face, hairstyle, " + (marks.strip().rstrip(".,") + ", " if marks.strip() else "") \
+            + "clothing, colors, proportions and art style as in <image1> in every panel."
     if panels == 6:
         return (
             "A character reference sheet of the character from <image1>, split into six equal tall panels side by side in one "
@@ -2023,8 +2126,8 @@ def sheet_prompt(headless=True, background="grey", marks="", panels=4):
         f"Plain solid {bg} background, soft even lighting, no text, no labels.")
 
 
-def qwen_sheet_graph(m, image, seed, headless=True, background="grey", marks="", panels=4):
-    prompt = sheet_prompt(headless, background, marks, panels)
+def qwen_sheet_graph(m, image, seed, headless=True, background="grey", marks="", panels=4, desc=""):
+    prompt = sheet_prompt(headless, background, marks, panels, desc)
     size = SHEET6_SIZE if panels == 6 else SHEET_SIZE
     g, stages = _qwen_base(m, image, size[0] * size[1] / 1048576, prompt, seed, size=size)
     return g, stages, prompt
@@ -2167,4 +2270,263 @@ def upscale_graph(m, video, scale, seed, soften=0.0):
         g["14"] = {"class_type": "ImageBlend", "inputs": {"image1": ["11", 0], "image2": ["3", 0], "blend_factor": soften, "blend_mode": "normal"}}
         g["12"]["inputs"]["images"] = ["14", 0]
         stages["14"] = "decode"
+    return g, stages
+
+
+def icons_graph(video, o):
+    """Animated icons: a video on a plain or any background -> transparent frames (PNG), an animated WEBP and a Telegram WebM.
+    Built from the user's workflows «WebP Loop» (cut by green / RMBG / MatAnyone2, then LoopCleanup).
+    `video`: a file in ComfyUI's input folder. `o`: method ('green' | 'rmbg' | 'matanyone'), edge (-8..4: negative = the edge goes inside, the green rim goes away),
+    threshold (green only), loop (cut the seam of a loop), despill, key ('green' | 'blue'), width/height (0: as the video), prefix, png, webp, telegram,
+    r_erode, r_dilate (MatAnyone's start mask)."""
+    method = o.get("method", "matanyone")
+    edge = int(o.get("edge", -2))
+    g = {"L": {"class_type": "LoadVideo", "inputs": {"file": video}},
+         "N": {"class_type": "GetVideoComponents", "inputs": {"video": ["L", 0]}}}
+    stages = {"L": "load", "N": "encode"}
+
+    def add(i, cls, **kw):
+        g[i] = {"class_type": cls, "inputs": kw}
+        stages[i] = "encode"
+
+    rmbg = dict(model="RMBG-2.0", sensitivity=1.0, process_res=1024, mask_blur=0, invert_output=False, refine_foreground=True,
+                background="Alpha", background_color="#222222")
+    if method == "green":   # no neural network: a pixel is background when it is greener than red AND blue
+        add("R", "ImageToMask", image=["N", 0], channel="red")
+        add("G", "ImageToMask", image=["N", 0], channel="green")
+        add("B", "ImageToMask", image=["N", 0], channel="blue")
+        add("GR", "MaskComposite", destination=["G", 0], source=["R", 0], x=0, y=0, operation="subtract")
+        add("GB", "MaskComposite", destination=["G", 0], source=["B", 0], x=0, y=0, operation="subtract")
+        add("GM", "MaskComposite", destination=["GR", 0], source=["GB", 0], x=0, y=0, operation="multiply")
+        add("T", "ThresholdMask", mask=["GM", 0], value=float(o.get("threshold", 0.02)))
+        add("W", "GrowMask", mask=["T", 0], expand=max(-8, min(8, edge + 3)), tapered_corners=True)
+        add("MI", "MaskToImage", mask=["W", 0])
+        add("BL", "ImageBlur", image=["MI", 0], blur_radius=2, sigma=1.0)   # soft edge (the user's workflow blurs it by a shader)
+        add("MK", "ImageToMask", image=["BL", 0], channel="red")
+        add("A", "JoinImageWithAlpha", image=["N", 0], alpha=["MK", 0])
+    elif method == "rmbg":
+        add("A", "RMBG", image=["N", 0], mask_offset=edge, **rmbg)
+    else:   # MatAnyone2: the mask of the hero from the first frame (RMBG), then MatAnyone leads it through all frames
+        add("F1", "ImageFromBatch", image=["N", 0], batch_index=0, length=1)
+        add("RM", "RMBG", image=["F1", 0], mask_offset=-2, **rmbg)
+        add("MA", "MatAnyone2", src_video=["N", 0], mask_frame=0, n_warmup=10, foreground_MASK=["RM", 1],
+            r_erode=int(o.get("r_erode", 0)), r_dilate=int(o.get("r_dilate", 0)), max_internal_size=960, max_mem_frames=5, use_long_term=False)
+        add("MR", "ImageToMask", image=["MA", 0], channel="red")
+        add("GM", "GrowMask", mask=["MR", 0], expand=edge, tapered_corners=False)
+        add("IM", "InvertMask", mask=["GM", 0])   # 1 = transparent background
+        add("A", "JoinImageWithAlpha", image=["N", 0], alpha=["IM", 0])
+    add("C", "LoopCleanup", images=["A", 0], despill=bool(o.get("despill", True)), find_loop=bool(o.get("loop", True)),
+        min_loop_frames=40, key_color=o.get("key", "green") if o.get("key") in ("green", "blue") else "green")
+    X = ["C", 0]
+    w, h = int(o.get("width") or 0), int(o.get("height") or 0)
+    if w >= 16 and h >= 16:   # the size of the frames (PNG, WEBP, sprite sheet)
+        add("S", "ImageScale", image=["C", 0], upscale_method="lanczos", width=w, height=h, crop="disabled")
+        X = ["S", 0]
+    prefix = o.get("prefix", "H3Workspace/icons/icon")
+    if o.get("png", True):
+        g["P"] = {"class_type": "SaveImage", "inputs": {"images": ["C", 0], "filename_prefix": prefix + "/frame"}}   # PNG frames: the video's own size, as in the workflow
+        stages["P"] = "save"
+    if o.get("webp"):
+        g["Q"] = {"class_type": "SaveAnimatedWEBP", "inputs": {"images": X, "filename_prefix": prefix + "/animation", "fps": ["N", 2],
+                                                               "lossless": True, "quality": 95, "method": "default"}}
+        stages["Q"] = "save"
+    if o.get("telegram"):
+        g["TG"] = {"class_type": "TelegramStickerWebM", "inputs": {"images": ["C", 0], "fps": ["N", 2], "filename_prefix": prefix + "/telegram",
+                                                                   "side": 512, "max_kb": 256, "max_seconds": 3.0}}
+        stages["TG"] = "save"
+    return g, stages
+
+
+ICON_UNET = "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+ICON_LORA = "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors"
+
+
+def icons_video_graph(m, unet, lora, prompt, width, height, seconds, seed, image):
+    """The picture -> video part of the user's Telegram workflow (the subgraph of the node «MiniMax H3»): the fl2va model,
+    Turbo 4-step v1.2 LoRA at 0.8, 6 steps, res_multistep; the picture is BOTH the first and the last frame (a seamless loop, the look is kept)."""
+    g = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+        "2": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": lora, "strength_model": 0.8}},
+        "5": {"class_type": "CLIPLoader", "inputs": {"clip_name": m["text_encoder"], "type": "minimax", "device": "default"}},
+        "6": {"class_type": "VAELoader", "inputs": {"vae_name": m["video_vae"]}},
+        "7": {"class_type": "VAELoader", "inputs": {"vae_name": m["audio_vae"]}},
+        "20": {"class_type": "LoadImage", "inputs": {"image": image}},
+        "21": {"class_type": "ImageScale", "inputs": {"image": ["20", 0], "upscale_method": "lanczos", "width": width, "height": height, "crop": "center"}},
+        "8": {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
+            "clip": ["5", 0], "vae": ["6", 0], "prompt": prompt, "width": width, "height": height, "length": frames(seconds),
+            "first_frame": ["21", 0], "last_frame": ["21", 0]}},
+        "9": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+        "10": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
+        "11": {"class_type": "BasicScheduler", "inputs": {"model": ["2", 0], "scheduler": "simple", "steps": 6, "denoise": 1.0}},
+        "12": {"class_type": "BasicGuider", "inputs": {"model": ["2", 0], "conditioning": ["8", 0]}},
+        "13": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["9", 0], "guider": ["12", 0], "sampler": ["10", 0],
+                                                                  "sigmas": ["11", 0], "latent_image": ["8", 1]}},
+        "14": {"class_type": "VAEDecode", "inputs": {"samples": ["13", 0], "vae": ["6", 0]}},
+        "15": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["13", 0], "vae": ["7", 0]}},
+        "16": {"class_type": "CreateVideo", "inputs": {"images": ["14", 0], "audio": ["15", 0], "fps": float(FPS),
+                                                       "bit_depth": "auto", "color_space": "sRGB", "codec": "none"}},
+        "17": {"class_type": "SaveVideo", "inputs": {"video": ["16", 0], "filename_prefix": "H3Workspace/video", "format": "auto", "format.codec": "auto"}},
+    }
+    stages = {n: "load" for n in ("1", "2", "5", "6", "7")}
+    stages.update({n: "encode" for n in ("8", "20", "21")})
+    stages.update({"13": "sample", "14": "decode", "15": "decode", "16": "save", "17": "save"})
+    return g, stages
+
+
+def icons_api_graph(base, o):
+    """The user's own, finished ComfyUI graph (her two workflows «WebP Loop» + «WebM Telegram», exported in API format and merged): nothing is rebuilt,
+    only her switches and inputs are set. o: mode ('image' | 'video'), image / video (file in ComfyUI's input), prompt, seconds, seed, vsize (W, H or None =
+    as the picture), bg ('' | green | pink | blue | white | gray | black), cutbg, method, edge, threshold, r_erode, r_dilate, despill, loop, key, size (W, H or None),
+    folder, png, webp, telegram."""
+    g = copy.deepcopy(base)
+
+    def put(i, k, v):
+        if i in g:
+            g[i]["inputs"][k] = v
+    folder = o["folder"]
+    method, edge = o.get("method", "matanyone"), int(o.get("edge", -2))
+    for i in ("223", "231"):
+        put(i, "value", method == "matanyone")       # MatAnyone on / the old way (green or RMBG)
+    for i in ("178", "204"):
+        put(i, "value", method == "green")           # green cut on / RMBG
+    for i in ("235", "236"):
+        put(i, "expand", edge)                       # the edge of MatAnyone's cut
+    for i in ("132", "190"):
+        put(i, "mask_offset", edge)                  # the edge of RMBG
+    for i in ("183", "208"):
+        put(i, "expand", max(-8, min(8, edge + 3)))  # the edge of the green cut
+    for i in ("174", "201"):
+        put(i, "value", float(o.get("threshold", 0.02)))
+    for i in ("219", "227"):
+        put(i, "r_erode", int(o.get("r_erode", 0)))
+        put(i, "r_dilate", int(o.get("r_dilate", 0)))
+    for i in ("240", "241"):
+        put(i, "despill", bool(o.get("despill", True)))
+        put(i, "find_loop", bool(o.get("loop", True)))
+        put(i, "key_color", o.get("key") if o.get("key") in ("green", "blue") else "green")
+    sz = o.get("size")
+    for i in ("188", "213"):
+        put(i, "value", bool(sz))                    # WEBP: own size / as the video
+    if sz:
+        for i in ("184", "209"):
+            put(i, "value", int(sz[0]))
+        for i in ("185", "210"):
+            put(i, "value", int(sz[1]))
+    out = {"image": ("92", "133", "137", "242"), "video": ("191", "192", "245")}
+    if o["mode"] == "image":
+        put("114", "image", o["image"])
+        put("105:104", "prompt", o["prompt"])
+        put("105:111", "value", float(o["seconds"]))
+        put("105:15", "noise_seed", int(o["seed"]))
+        put("138", "value", folder)
+        vs = o.get("vsize")
+        put("164", "value", bool(vs))                # own resolution / the picture's own size
+        if vs:
+            put("162", "width", int(vs[0]))
+            put("162", "height", int(vs[1]))
+        for k, i in (("green", "142"), ("pink", "143"), ("blue", "144"), ("white", "145"), ("gray", "146"), ("black", "147")):
+            put(i, "value", o.get("bg") == k)
+        put("167", "value", bool(o.get("cutbg")))
+        want = {"92": True, "133": bool(o.get("png")), "137": bool(o.get("webp")), "242": bool(o.get("telegram"))}
+    else:
+        put("214", "file", o["video"])
+        put("191", "filename_prefix", folder + "/alpha_frames/frame")
+        put("192", "filename_prefix", folder + "/webp/animation")
+        put("245", "filename_prefix", folder + "/telegram/sticker")
+        want = {"191": bool(o.get("png")), "192": bool(o.get("webp")), "245": bool(o.get("telegram"))}
+    for i in out["image"] + out["video"]:
+        if want.get(i) is not True:
+            g.pop(i, None)
+    # what really runs: everything upstream of the kept outputs
+    need, stack = set(), [i for i in want if want[i] and i in g]
+    while stack:
+        i = stack.pop()
+        if i in need or i not in g:
+            continue
+        need.add(i)
+        for v in g[i]["inputs"].values():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
+                stack.append(v[0])
+    stage = {"105:6": "load", "105:121": "load", "105:13": "load", "105:11": "load", "105:24": "load", "105:104": "encode", "105:14": "sample",
+             "105:10": "decode", "105:23": "decode", "105:91": "save", "92": "save", "131": "decode", "189": "decode", "132": "upscale", "190": "upscale",
+             "218": "upscale", "226": "upscale", "219": "sample2", "227": "sample2", "133": "save", "137": "save", "191": "save", "192": "save",
+             "242": "save", "245": "save"}
+    stages = {i: stage[i] for i in need if i in stage}
+    return g, stages, need
+
+
+# ---------- 3D model from one picture (her two ComfyUI graphs: TripoSplat «Точно» and Trellis 2 «Чисто», API format in graphs3d/) ----------
+
+TD_NODES = {
+    "triposplat": ["LoadImage", "RemoveBackground", "LoadBackgroundRemovalModel", "TripoSplatPreprocessImage", "CLIPVisionLoader", "VAELoader", "UNETLoader",
+                   "TripoSplatConditioning", "KSampler", "VAEDecodeTripoSplat", "SplatToMesh", "RemeshMesh", "DecimateMesh", "MeshSmoothNormals", "SMeshClay", "SSave3D"],
+    "trellis": ["LoadImage", "RemoveBackground", "LoadBackgroundRemovalModel", "ImageCropToMask", "ComfySwitchNode", "CLIPVisionLoader", "VAELoader", "UNETLoader",
+                "CFGOverride", "RescaleCFG", "ModelSamplingSD3", "Trellis2Conditioning", "EmptyTrellis2LatentStructure", "VaeDecodeStructureTrellis2", "Trellis2ShapeStage",
+                "Trellis2UpsampleStage", "VaeDecodeShapeTrellis", "KSampler", "ComfyMathExpression", "PrimitiveInt", "RemeshMesh", "DecimateMesh", "MeshSmoothNormals", "SMeshClay", "SSave3D"],
+}
+# the model files of each variant: (loader class, field, file name as in the graph)
+TD_MODELS = {
+    "triposplat": [("UNETLoader", "unet_name", "3D/triposplat_fp16.safetensors"), ("CLIPVisionLoader", "clip_name", "3D/dino_v3_vit_h.safetensors"),
+                   ("VAELoader", "vae_name", "3D/flux2-vae.safetensors"), ("VAELoader", "vae_name", "3D/triposplat_vae_decoder_fp16.safetensors"),
+                   ("LoadBackgroundRemovalModel", "bg_removal_name", "3D/birefnet.safetensors")],
+    "trellis": [("UNETLoader", "unet_name", "3D/trellis_2_int8_convrot.safetensors"), ("CLIPVisionLoader", "clip_name", "3D/dino_v3_L_naf_fp32.safetensors"),
+                ("VAELoader", "vae_name", "3D/trellis_2_shape_vae_bf16.safetensors"), ("LoadBackgroundRemovalModel", "bg_removal_name", "3D/birefnet.safetensors")],
+}
+
+
+def _hf(repo, sub, name, size):
+    return {"file": name, "url": f"https://huggingface.co/{repo}/resolve/main/{sub}/{name}", "page": f"https://huggingface.co/{repo}/blob/main/{sub}/{name}", "size": size}
+
+
+# download links (Hugging Face, the same files as in the README of sofiakholina-3D-Generation); size in bytes
+TD_FILES = {f["file"].lower(): f for f in (
+    _hf("VAST-AI/TripoSplat", "diffusion_models", "triposplat_fp16.safetensors", 741106994),
+    _hf("VAST-AI/TripoSplat", "clip_vision", "dino_v3_vit_h.safetensors", 1681247696),
+    _hf("VAST-AI/TripoSplat", "vae", "triposplat_vae_decoder_fp16.safetensors", 576148442),
+    _hf("VAST-AI/TripoSplat", "vae", "flux2-vae.safetensors", 336213556),
+    _hf("Comfy-Org/BiRefNet", "background_removal", "birefnet.safetensors", 444473596),
+    _hf("Comfy-Org/TRELLIS.2", "diffusion_models", "trellis_2_int8_convrot.safetensors", 5253048192),
+    _hf("Comfy-Org/Pixal3D", "clip_vision", "dino_v3_L_naf_fp32.safetensors", 1215214176),
+    _hf("Comfy-Org/Pixal3D", "vae", "trellis_2_shape_vae_bf16.safetensors", 1095844024),
+)}
+
+
+def td_api_graph(base, o):
+    """o: variant ('triposplat' | 'trellis'), image (file in ComfyUI's input), seed, faces, format ('glb' | 'fbx' | 'obj'), folder (where ComfyUI writes the file),
+    name (file name), nobg (Trellis: cut the background out first), models (dict: lower-case file name -> the name ComfyUI lists).
+    The viewer node (Preview3DAdvanced) is dropped: it only works inside ComfyUI's own window."""
+    g = copy.deepcopy(base)
+    v = o["variant"]
+    for i in [k for k, n in g.items() if n["class_type"] in ("Preview3DAdvanced", "MeshToFile3D")]:
+        g.pop(i)
+
+    def first(cls):
+        return next(k for k, n in g.items() if n["class_type"] == cls)
+    g[first("LoadImage")]["inputs"]["image"] = o["image"]
+    seed = int(o["seed"])
+    for k, n in g.items():
+        if n["class_type"] == "PrimitiveInt" and n["inputs"].get("value") not in (1024,):
+            n["inputs"]["value"] = seed
+        if n["class_type"] == "DecimateMesh":
+            n["inputs"]["target_face_count"] = int(o["faces"])
+        if n["class_type"] == "ComfySwitchNode" and v == "trellis":
+            n["inputs"]["switch"] = bool(o.get("nobg", True))
+        for field, val in list(n["inputs"].items()):
+            if isinstance(val, str) and n["class_type"] in ("UNETLoader", "CLIPVisionLoader", "VAELoader", "LoadBackgroundRemovalModel"):
+                real = (o.get("models") or {}).get(val.replace(chr(92), "/").split("/")[-1].lower())   # the file name exactly as this ComfyUI lists it
+                if real:
+                    n["inputs"][field] = real
+    s = g[first("SSave3D")]["inputs"]
+    fmt = o["format"] if o["format"] in ("glb", "fbx", "obj") else "glb"
+    s.update(autosave=True, format=fmt, filename_prefix=o["name"], folder=o["folder"], save_units="m" if fmt != "fbx" else "mm", input_units="m")
+    pv = copy.deepcopy(g[first("SSave3D")])
+    pv["inputs"].update(format="glb", folder=o["preview_dir"], filename_prefix=o["name"] + "_pv", save_units="m")
+    g["pv_save"] = pv
+    stages = {}
+    for k, n in g.items():
+        c = n["class_type"]
+        stages[k] = ("load" if c in ("LoadImage", "CLIPVisionLoader", "VAELoader", "UNETLoader", "LoadBackgroundRemovalModel") else
+                     "encode" if "Conditioning" in c or c in ("RemoveBackground", "TripoSplatPreprocessImage", "ImageCropToMask") else
+                     "sample" if c == "KSampler" or "Stage" in c else
+                     "save" if c == "SSave3D" else "decode")
     return g, stages

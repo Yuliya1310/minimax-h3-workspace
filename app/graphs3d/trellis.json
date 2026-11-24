@@ -1,0 +1,573 @@
+{
+ "122": {
+  "inputs": {
+   "image": "example.png"
+  },
+  "class_type": "LoadImage",
+  "_meta": {
+   "title": "Load Image",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "327": {
+  "inputs": {
+   "viewport_state": {},
+   "width": 1024,
+   "height": 1024,
+   "model_3d": [
+    "332:282",
+    0
+   ]
+  },
+  "class_type": "Preview3DAdvanced",
+  "_meta": {
+   "title": "RESULT",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "329": {
+  "inputs": {
+   "value": 46
+  },
+  "class_type": "PrimitiveInt",
+  "_meta": {
+   "title": "seed",
+   "cnr_id": "comfy-core",
+   "ver": "0.46.0"
+  }
+ },
+ "342": {
+  "inputs": {
+   "autosave": false,
+   "format": "fbx",
+   "filename_prefix": "Trellis2_3D",
+   "folder": "",
+   "save_units": "mm",
+   "input_units": "m",
+   "mesh": [
+    "332:238",
+    0
+   ]
+  },
+  "class_type": "SSave3D",
+  "_meta": {
+   "title": "Save 3D"
+  }
+ },
+ "332:3": {
+  "inputs": {
+   "seed": [
+    "329",
+    0
+   ],
+   "steps": 30,
+   "cfg": 7.5,
+   "sampler_name": "euler",
+   "scheduler": "normal",
+   "denoise": 1,
+   "model": [
+    "332:108",
+    0
+   ],
+   "positive": [
+    "332:299",
+    0
+   ],
+   "negative": [
+    "332:299",
+    1
+   ],
+   "latent_image": [
+    "332:87",
+    0
+   ]
+  },
+  "class_type": "KSampler",
+  "_meta": {
+   "title": "KSampler",
+   "cnr_id": "comfy-core",
+   "ver": "0.17.0"
+  }
+ },
+ "332:15": {
+  "inputs": {
+   "clip_name": "3D\\dino_v3_L_naf_fp32.safetensors"
+  },
+  "class_type": "CLIPVisionLoader",
+  "_meta": {
+   "title": "Load CLIP Vision",
+   "cnr_id": "comfy-core",
+   "ver": "0.21.1"
+  }
+ },
+ "332:18": {
+  "inputs": {
+   "seed": [
+    "329",
+    0
+   ],
+   "steps": 20,
+   "cfg": 7.5,
+   "sampler_name": "euler",
+   "scheduler": "normal",
+   "denoise": 1,
+   "model": [
+    "332:126",
+    0
+   ],
+   "positive": [
+    "332:91",
+    0
+   ],
+   "negative": [
+    "332:91",
+    1
+   ],
+   "latent_image": [
+    "332:91",
+    2
+   ]
+  },
+  "class_type": "KSampler",
+  "_meta": {
+   "title": "KSampler",
+   "cnr_id": "comfy-core",
+   "ver": "0.17.0"
+  }
+ },
+ "332:23": {
+  "inputs": {
+   "seed": [
+    "329",
+    0
+   ],
+   "steps": 5,
+   "cfg": 7.5,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "denoise": 1,
+   "model": [
+    "332:126",
+    0
+   ],
+   "positive": [
+    "332:94",
+    0
+   ],
+   "negative": [
+    "332:94",
+    1
+   ],
+   "latent_image": [
+    "332:94",
+    2
+   ]
+  },
+  "class_type": "KSampler",
+  "_meta": {
+   "title": "KSampler",
+   "cnr_id": "comfy-core",
+   "ver": "0.17.0"
+  }
+ },
+ "332:279": {
+  "inputs": {
+   "cfg": 1,
+   "start_percent": 0.769,
+   "end_percent": 1,
+   "model": [
+    "332:40",
+    0
+   ]
+  },
+  "class_type": "CFGOverride",
+  "_meta": {
+   "title": "CFG Override",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:282": {
+  "inputs": {
+   "mesh": [
+    "332:341",
+    0
+   ]
+  },
+  "class_type": "MeshToFile3D",
+  "_meta": {
+   "title": "Create 3D File (from Mesh)",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:40": {
+  "inputs": {
+   "unet_name": "3D\\trellis_2_int8_convrot.safetensors",
+   "weight_dtype": "default"
+  },
+  "class_type": "UNETLoader",
+  "_meta": {
+   "title": "Load Diffusion Model",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:299": {
+  "inputs": {
+   "clip_vision_model": [
+    "332:15",
+    0
+   ],
+   "image": [
+    "332:312",
+    0
+   ]
+  },
+  "class_type": "Trellis2Conditioning",
+  "_meta": {
+   "title": "Trellis2 Conditioning",
+   "cnr_id": "comfy-core",
+   "ver": "0.17.0"
+  }
+ },
+ "332:312": {
+  "inputs": {
+   "width": 1024,
+   "height": 1024,
+   "pad_factor": 1.1,
+   "grow_mask": 0,
+   "background": "#000000",
+   "images": [
+    "122",
+    0
+   ],
+   "masks": [
+    "332:248",
+    0
+   ]
+  },
+  "class_type": "ImageCropToMask",
+  "_meta": {
+   "title": "Crop Image to Mask",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:186": {
+  "inputs": {
+   "target_face_count": 200000,
+   "placement_mode": "midpoint",
+   "mesh": [
+    "332:241",
+    0
+   ]
+  },
+  "class_type": "DecimateMesh",
+  "_meta": {
+   "title": "Decimate Mesh",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:192": {
+  "inputs": {
+   "bg_removal_model": [
+    "332:193",
+    0
+   ],
+   "image": [
+    "122",
+    0
+   ]
+  },
+  "class_type": "RemoveBackground",
+  "_meta": {
+   "title": "Remove Background",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:193": {
+  "inputs": {
+   "bg_removal_name": "3D\\birefnet.safetensors"
+  },
+  "class_type": "LoadBackgroundRemovalModel",
+  "_meta": {
+   "title": "Load Background Removal Model",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:199": {
+  "inputs": {
+   "cfg": 1,
+   "start_percent": 0.667,
+   "end_percent": 1,
+   "model": [
+    "332:40",
+    0
+   ]
+  },
+  "class_type": "CFGOverride",
+  "_meta": {
+   "title": "CFG Override",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:330": {
+  "inputs": {
+   "value": 1024
+  },
+  "class_type": "PrimitiveInt",
+  "_meta": {
+   "title": "target_resolution",
+   "cnr_id": "comfy-core",
+   "ver": "0.46.0"
+  }
+ },
+ "332:331": {
+  "inputs": {
+   "expression": "min(max(round(a / 128) * 128, 1024), 1536)",
+   "values.a": [
+    "332:330",
+    0
+   ]
+  },
+  "class_type": "ComfyMathExpression",
+  "_meta": {
+   "title": "Math Expression",
+   "cnr_id": "comfy-core",
+   "ver": "0.46.0"
+  }
+ },
+ "332:87": {
+  "inputs": {
+   "batch_size": 1
+  },
+  "class_type": "EmptyTrellis2LatentStructure",
+  "_meta": {
+   "title": "Empty Trellis2 Latent Structure",
+   "cnr_id": "comfy-core",
+   "ver": "0.21.1"
+  }
+ },
+ "332:91": {
+  "inputs": {
+   "positive": [
+    "332:299",
+    0
+   ],
+   "negative": [
+    "332:299",
+    1
+   ],
+   "voxel": [
+    "332:119",
+    0
+   ]
+  },
+  "class_type": "Trellis2ShapeStage",
+  "_meta": {
+   "title": "Trellis2 Shape Stage",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:92": {
+  "inputs": {
+   "samples": [
+    "332:23",
+    0
+   ],
+   "vae": [
+    "332:117",
+    0
+   ]
+  },
+  "class_type": "VaeDecodeShapeTrellis",
+  "_meta": {
+   "title": "Trellis2 VAE Decode Shape",
+   "cnr_id": "comfy-core",
+   "ver": "0.17.0"
+  }
+ },
+ "332:94": {
+  "inputs": {
+   "target_resolution": [
+    "332:331",
+    1
+   ],
+   "positive": [
+    "332:91",
+    0
+   ],
+   "negative": [
+    "332:91",
+    1
+   ],
+   "shape_latent": [
+    "332:18",
+    0
+   ],
+   "vae": [
+    "332:117",
+    0
+   ]
+  },
+  "class_type": "Trellis2UpsampleStage",
+  "_meta": {
+   "title": "Trellis2 Upsample Stage",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:108": {
+  "inputs": {
+   "shift": 5,
+   "model": [
+    "332:125",
+    0
+   ]
+  },
+  "class_type": "ModelSamplingSD3",
+  "_meta": {
+   "title": "ModelSamplingSD3",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:238": {
+  "inputs": {
+   "crease_angle": 30,
+   "mesh": [
+    "332:186",
+    0
+   ]
+  },
+  "class_type": "MeshSmoothNormals",
+  "_meta": {
+   "title": "Smooth Mesh Normals",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:241": {
+  "inputs": {
+   "resolution": 512,
+   "sign_mode": "solid",
+   "sign_mode.fill": 20,
+   "sign_mode.qef": false,
+   "band": 1,
+   "project_back": 0,
+   "fix_poles": false,
+   "smooth_iters": 20,
+   "drop_small_components": 0.01,
+   "precluster_max_verts": 20000000,
+   "mesh": [
+    "332:92",
+    0
+   ]
+  },
+  "class_type": "RemeshMesh",
+  "_meta": {
+   "title": "Remesh Mesh (Narrow-Band DC)",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:117": {
+  "inputs": {
+   "vae_name": "3D\\trellis_2_shape_vae_bf16.safetensors"
+  },
+  "class_type": "VAELoader",
+  "_meta": {
+   "title": "Load VAE",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:119": {
+  "inputs": {
+   "resolution": "32",
+   "samples": [
+    "332:3",
+    0
+   ],
+   "vae": [
+    "332:117",
+    0
+   ]
+  },
+  "class_type": "VaeDecodeStructureTrellis2",
+  "_meta": {
+   "title": "Trellis2 VAE Decode Structure",
+   "cnr_id": "comfy-core",
+   "ver": "0.17.0"
+  }
+ },
+ "332:248": {
+  "inputs": {
+   "switch": true,
+   "on_false": [
+    "122",
+    1
+   ],
+   "on_true": [
+    "332:192",
+    0
+   ]
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "Switch: Remove background",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:125": {
+  "inputs": {
+   "multiplier": 0.7,
+   "model": [
+    "332:199",
+    0
+   ]
+  },
+  "class_type": "RescaleCFG",
+  "_meta": {
+   "title": "RescaleCFG",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:126": {
+  "inputs": {
+   "multiplier": 0.5,
+   "model": [
+    "332:279",
+    0
+   ]
+  },
+  "class_type": "RescaleCFG",
+  "_meta": {
+   "title": "RescaleCFG",
+   "cnr_id": "comfy-core",
+   "ver": "0.33.0"
+  }
+ },
+ "332:341": {
+  "inputs": {
+   "mesh": [
+    "332:238",
+    0
+   ]
+  },
+  "class_type": "SMeshClay",
+  "_meta": {
+   "title": "Mesh Clay"
+  }
+ }
+}

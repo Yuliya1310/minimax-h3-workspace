@@ -57,8 +57,8 @@ PRESETS = {
     "character": {
         "face": P("Поворот лица", "левый профиль · анфас · правый профиль", 6, [
             ("слева", "head and shoulders close-up, the face turned fully to the left in profile", 0.0),
-            ("анфас", "the head slowly turns to look straight into the camera, front view", 0.5),
-            ("справа", "the head keeps turning and ends fully to the right in profile", 1.0)]),
+            ("анфас", "head and shoulders close-up, the head slowly turns to look straight into the camera, front view", 0.5),
+            ("справа", "head and shoulders close-up, the head keeps turning and ends fully to the right in profile", 1.0)]),
         "orbit360": P("Поворот 360°", "камера облетает героя в полный рост · 5 кадров: спереди, 3/4, бок, сзади, другой бок", 12, [
             ("спереди", "full body front view, the person stands completely still in a relaxed neutral pose, the camera starts one slow smooth orbit around them", 0.0),
             ("3/4", "the camera has orbited 45 degrees around the standing person, three-quarter view, full body from head to feet in the frame", 45 / 360),
@@ -146,10 +146,17 @@ def build_prompt(p):
         parts.append("Every view is centred on " + clean(p.get("focus"), 200).rstrip(".") + ".")
     if any("orbit" in clean(b.get("text"), 300) for b in beats):   # the full-turn sheet: the hero stands still, the camera goes round him
         parts.append("The person does not move at all and the camera makes one smooth full 360-degree orbit around them at a constant distance; the whole body from head to feet stays in the frame.")
-    if typ != "location":   # a flat one-colour backdrop: no floor, no horizon, no shadows, so the figure can fill the frame
+    texts = " ".join(clean(b.get("text"), 300).lower() for b in beats)
+    close = typ == "character" and ("close-up" in texts or "head and shoulders" in texts) and "full body" not in texts and "orbit" not in texts
+    if typ != "location":   # a flat one-colour backdrop: no floor, no horizon, no shadows, so the figure can be cut out cleanly
         parts.append("The background is one flat seamless light grey colour everywhere, like a cut-out on a plain sheet: no floor, no floor line, no horizon, "
                      "no gradient, no vignette, no backdrop edges, no cast shadows, no ground shadow, no reflections, no props. "
-                     "The subject is lit evenly from the front and fills most of the frame height, with only a small margin above and below.")
+                     "The subject is lit evenly from the front. ")
+        if close:   # a face sheet: every view is a tight close-up, even when the reference picture shows the whole body
+            parts.append("The framing is a tight head-and-shoulders close-up in every moment of the clip: the face is large and fills most of the frame, "
+                         "the shoulders are cut by the lower edge of the frame, the body below the chest is never shown, even if the reference picture shows the whole body.")
+        else:
+            parts.append("The subject fills most of the frame height, with only a small margin above and below.")
     parts.append("One continuous take, no cuts, steady and clean camera, "
                  + ("" if typ == "location" else "flat even light, ") + "no text, no music, no dialogue.")
     moves = []
@@ -294,7 +301,7 @@ class Store:
                "preset": clean(meta.get("preset"), 60), "status": "finished" if meta.get("status") == "finished" else "draft",
                "date": (old or {}).get("date") or datetime.now().isoformat(timespec="seconds"), "star": bool((old or {}).get("star")),
                "rating": int((old or {}).get("rating") or 0), "res": clean(meta.get("res"), 20), "seed": clean(meta.get("seed"), 20),
-               "video": clean(meta.get("video"), 40), "seconds": float(meta.get("seconds") or SECONDS), "layout": meta.get("layout") if isinstance(meta.get("layout"), dict) else {},
+               "video": clean(meta.get("video"), 40), "draft_video": clean(meta["draft_video"], 40) if "draft_video" in meta else (old or {}).get("draft_video", ""), "seconds": float(meta.get("seconds") or SECONDS), "layout": meta.get("layout") if isinstance(meta.get("layout"), dict) else {},
                "form": meta.get("form") if isinstance(meta.get("form"), dict) else {}, "beats": beats, "sheet": sheet}
         if old:
             self.runs[self.runs.index(old)] = run

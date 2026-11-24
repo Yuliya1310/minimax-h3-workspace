@@ -1,0 +1,3 @@
+ffmpeg.exe is the FFmpeg program (https://ffmpeg.org), build "essentials" from https://www.gyan.dev/ffmpeg/builds/ (version 8.1.2),
+licensed under GPL v3 (https://www.gnu.org/licenses/gpl-3.0.html). It is started as a separate program to join and encode video.
+Source code of FFmpeg and of this build: https://ffmpeg.org/download.html#get-sources and https://www.gyan.dev/ffmpeg/builds/

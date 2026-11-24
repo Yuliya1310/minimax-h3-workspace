@@ -32,7 +32,7 @@ VSVersionInfo(
 a = Analysis(
     [str(APP / "main.py")],
     pathex=[str(APP)],
-    datas=[(str(APP / "ui" / "index.html"), "ui"), (str(APP / "ui" / "previews"), "ui/previews"), (str(APP / "skills"), "skills"), (str(APP / "rh_workflows"), "rh_workflows"), (str(APP / "bin"), "bin")],
+    datas=[(str(APP / "ui" / "index.html"), "ui"), (str(APP / "ui" / "previews"), "ui/previews"), (str(APP / "ui" / "vendor"), "ui/vendor"), (str(APP / "skills"), "skills"), (str(APP / "rh_workflows"), "rh_workflows"), (str(APP / "bin"), "bin"), (str(APP / "icon_nodes"), "icon_nodes"), (str(APP / "graphs3d"), "graphs3d")],
     hiddenimports=["webview.platforms.edgechromium", "webview.platforms.winforms", "clr", "certifi"],
     excludes=["tkinter", "matplotlib", "numpy", "PIL", "pandas", "scipy", "IPython"],
 )

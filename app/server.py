@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -34,6 +35,8 @@ import catalog
 import cloud
 import customwf
 import engine
+import errorhelp
+import llmapi
 import monitor
 import mp4info
 import projects as prj
@@ -44,6 +47,8 @@ import rhlib
 import rhstudio
 import speech
 import updater
+import vmix
+import sheetsage
 import voicelab
 from version import APP_VERSION
 
@@ -174,6 +179,7 @@ class App:
         self.browsers = set()
         self.saved_queue = self.load_queue()  # unfinished jobs of the previous run (asked about at start)
         self.jobs = JobStore(self.save_queue)  # prompt_id -> job dict
+        self.ff_procs = {}  # prompt_id -> {proc, stopped} of montages written by ffmpeg
         self.library = Library(LIBRARY_FILE)
         self.refmodes = refmodes.Store(REFMODES_FILE, REFMODES_DIR)
         self.voices = voicelab.Store(DATA_DIR / "voicelab")
@@ -191,6 +197,8 @@ class App:
         self.llm = ag.LlamaServer(self.llm_root(), DATA_DIR / "llama.log")
         self.agent_installer = None
         self.hw = None
+        self.start_problem = None   # why the built-in ComfyUI did not start: shown on the main screen with a fix button
+        self.start_busy = ""        # a repair is running now (text for the screen)
         self.rh_models = None  # model paths found in the user's RunningHub workflow
         self.monitor = monitor.Monitor()
         self.recent_errors = []  # last problems, for the report to the author
@@ -295,6 +303,7 @@ class App:
                 self.packs_task = asyncio.create_task(self.install_missing_packs())
             else:
                 self.start_managed()
+                self.watch_task = asyncio.create_task(self.watch_start())
         self.ws_task = asyncio.create_task(self.comfy_ws_loop())
         self.watchdog_task = asyncio.create_task(self.jobs_watchdog())
         self.poller_task = asyncio.create_task(self.jobs_poller())
@@ -320,6 +329,34 @@ class App:
             print(f"Не удалось докачать ноды ({type(e).__name__}): {e}", file=sys.stderr)
         if not self.process:
             self.start_managed()
+            self.watch_task = asyncio.create_task(self.watch_start())
+
+    async def watch_start(self):
+        """After the program's own start of ComfyUI: wait for it; when it dies, remember WHY (the main screen shows it with the fitting button)."""
+        self.start_problem = None
+        try:
+            await self.wait_comfy()
+        except Exception as e:
+            text = str(e)
+            if "Torch not compiled with CUDA" in text:
+                kind = "torch"
+            elif re.search(r"No module named|ModuleNotFoundError", text):
+                kind = "module"
+            elif re.search(r"cuda|nvidia|driver", text, re.I):
+                kind = "driver"
+            else:
+                kind = "other"
+            self.start_problem = {"kind": kind, "text": text[-1500:]}
+
+    async def h_comfy_restart(self, _req):
+        """The button «Запустить ещё раз» on the main screen."""
+        if self.config.get("engine") != "managed" or self.installer or getattr(self, "comfy_updating", False):
+            return web.json_response({"error": "Сейчас это сделать нельзя."}, status=409)
+        if self.process:
+            await asyncio.to_thread(self.process.stop)
+        self.start_managed()
+        await self.watch_start()
+        return web.json_response({"ok": not self.start_problem, "problem": self.start_problem})
 
     async def stop(self, _app):
         self.ws_task.cancel()
@@ -338,13 +375,89 @@ class App:
         self.process.start()
         self.output_dir = root / "ComfyUI" / "output"
 
-    async def wait_comfy(self, timeout=300):
+    async def torch_state(self):
+        """(torch version, CUDA works) of the built-in ComfyUI's Python, or None when it cannot be asked."""
+        root = self.comfy_root()
+        py = root / "python_embeded" / "python.exe"
+        if not py.is_file():
+            return None
+        try:
+            p = await asyncio.create_subprocess_exec(str(py), "-s", "-c", "import torch; print(torch.__version__, torch.cuda.is_available())",
+                                                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                                                     creationflags=engine.CREATE_NO_WINDOW, env=engine.local_env(root))
+            out, _ = await asyncio.wait_for(p.communicate(), 180)
+        except (OSError, asyncio.TimeoutError):
+            return None
+        m = re.search(r"(\S+)\s+(True|False)", out.decode("utf-8", "ignore"))
+        return (m.group(1), m.group(2) == "True") if m else None
+
+    async def fix_torch(self):
+        """PyTorch of the built-in ComfyUI came without CUDA (an update or an add-on pulled the plain «processor only» build from the internet):
+        ComfyUI dies at start with «Torch not compiled with CUDA enabled». Put the video-card build of the SAME version back. True when CUDA works."""
+        if self.hw is None:
+            self.hw = await asyncio.to_thread(engine.detect_hardware)
+        cc = float(self.hw.get("compute_cap") or 0)
+        if not cc:   # no NVIDIA card: the processor build is the right one
+            return False
+        st = await self.torch_state()
+        if st and st[1]:
+            return True
+        ver = (st[0].split("+")[0] if st else "")
+        index = "cu130" if cc >= 7.5 else "cu126"
+        root = self.comfy_root()
+        py = root / "python_embeded" / "python.exe"
+        pins = ["torch"]   # all three come together from the CUDA index: their versions match each other (a mixed set is what the «update dependencies» file leaves behind)
+        args = ["-s", "-m", "pip", "install", "--force-reinstall", "--no-deps", "--upgrade", *pins, "torchvision", "torchaudio", "--index-url", f"https://download.pytorch.org/whl/{index}"]
+        self.note_error("PyTorch во встроенном ComfyUI без поддержки видеокарты: ставлю нужную версию (несколько минут, нужен интернет).")
+        self.start_busy = "Ставлю PyTorch для видеокарты (несколько минут, нужен интернет). Не закрывайте программу."
+        try:
+            p = await asyncio.create_subprocess_exec(str(py), *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                                                     creationflags=engine.CREATE_NO_WINDOW, env=engine.local_env(root))
+            await asyncio.wait_for(p.wait(), 3000)
+        except (OSError, asyncio.TimeoutError) as e:
+            print(f"PyTorch repair: {type(e).__name__}: {e}", file=sys.stderr)
+            return False
+        finally:
+            self.start_busy = ""
+        st = await self.torch_state()
+        return bool(st and st[1])
+
+    async def h_comfy_fix_torch(self, _req):
+        """The button «Починить ComfyUI (видеокарта)»: the check and the repair above, then ComfyUI starts again."""
+        if self.config.get("engine") != "managed":
+            return web.json_response({"error": "Это работает только для встроенного ComfyUI. У вашего собственного ComfyUI PyTorch чините там, где он стоит."}, status=400)
+        if self.installer or getattr(self, "comfy_updating", False):
+            return web.json_response({"error": "Сейчас идёт установка или обновление. Дождитесь конца."}, status=409)
+        self.comfy_updating = True
+        try:
+            if self.process:
+                await asyncio.to_thread(self.process.stop)
+            before = await self.torch_state()
+            ok = await self.fix_torch()
+            after = await self.torch_state()
+            self.start_managed()
+            try:
+                await self.wait_comfy(torch_fix=False)
+            except Exception as e:
+                return web.json_response({"error": "ComfyUI не запустился после проверки PyTorch.\n" + str(e)[:1500], "torch_before": before, "torch_after": after}, status=500)
+            self.start_problem = None
+            return web.json_response({"ok": True, "fixed": ok, "torch_before": before, "torch_after": after})
+        finally:
+            self.comfy_updating = False
+
+    async def wait_comfy(self, timeout=300, torch_fix=True):
         """Wait until ComfyUI answers; raise with its log if the process died."""
         loop = asyncio.get_running_loop()
         end = loop.time() + timeout
         while loop.time() < end:
             if self.process and not self.process.alive():
                 tail = self.process.log_tail()
+                if torch_fix and "Torch not compiled with CUDA" in tail and self.config.get("engine") == "managed":   # the plain PyTorch got in: put the video-card one back and start again
+                    torch_fix = False
+                    if await self.fix_torch():
+                        self.start_managed()
+                        end = loop.time() + timeout
+                        continue
                 hint = ("\n\nПохоже, проблема в драйвере видеокарты. Обновите драйвер NVIDIA (nvidia.com/drivers), "
                         "перезагрузите компьютер и нажмите «Продолжить».") if re.search(r"cuda|nvidia|driver", tail, re.I) else ""
                 raise RuntimeError("ComfyUI не запустился:\n" + tail + hint)
@@ -555,6 +668,13 @@ class App:
                   for f in lst if isinstance(f, dict) and "filename" in f]
         files = [f for _, f in tagged]
         node_of = {id(f): nid for nid, f in tagged}
+        if (job.get("meta") or {}).get("td"):   # a 3D model: the path of the file is in the text output of Save 3D
+            await self.finish_td(job, outputs)
+            return
+        ic = (job.get("meta") or {}).get("icons")
+        if ic:   # animated icons: frames, sprite sheet, WEBP and Telegram sticker go to their own folder, not frame by frame into the Library
+            await self.finish_icons(job, ic, files)
+            return
         videos = [f for f in files if f["filename"].lower().endswith((".mp4", ".webm", ".mkv", ".mov"))]
         videos = [f for f in videos if f.get("type", "output") == "output"] or videos  # not the previews of loaded clips
         lg = (job.get("meta") or {}).get("long")
@@ -608,6 +728,8 @@ class App:
         await self.broadcast({"type": "done", "prompt_id": pid, "item": items[0], "items": items})
 
     async def broadcast(self, payload):
+        if payload.get("type") == "error" and isinstance(payload.get("message"), str):   # every error goes to the screen with a plain explanation
+            payload = {**payload, "message": errorhelp.explain(payload["message"])}
         text = json.dumps(payload, ensure_ascii=False)
         for b in list(self.browsers):
             try:
@@ -717,10 +839,27 @@ class App:
 
     # ---------- HTTP handlers ----------
 
+    def ext_python(self):
+        """The Python of the user's OWN ComfyUI, when it can be found by its folder (portable, venv); '' when unknown. Only shown in a hint: never run."""
+        raw = (self.config.get("own_comfy_dir") or "").strip()
+        if not raw:
+            return ""
+        d = Path(raw)
+        for c in (d / "python_embeded" / "python.exe", d.parent / "python_embeded" / "python.exe", d / "venv" / "Scripts" / "python.exe",
+                  d / ".venv" / "Scripts" / "python.exe", d / "ComfyUI" / "venv" / "Scripts" / "python.exe"):
+            try:
+                if c.is_file():
+                    return str(c)
+            except OSError:
+                pass
+        return ""
+
     async def h_status(self, _req):
         base = {"configured": bool(self.config.configured or self.comfy_override),
                 "engine": self.config.get("engine"), "full_mode": bool(self.config.get("full_mode")), "installing": bool(self.installer),
                 "saved_modes": self.config.get("modes") or [],
+                "start_problem": self.start_problem, "start_busy": self.start_busy,
+                "ext_python": self.ext_python() if self.config.get("engine") == "external" else "",
                 # the name of a rented server (never the login or the password): the UI shows plainly which engine is in use
                 "server_host": (urllib.parse.urlparse(self.comfy).hostname or "") if self.config.get("engine") == "external"
                                and urllib.parse.urlparse(self.comfy).hostname not in ("127.0.0.1", "localhost", "::1", None) else ""}
@@ -747,7 +886,7 @@ class App:
         add_modes = {m: round((catalog.plan_size(choice, self.modes() + [m]) - catalog.plan_size(choice, self.modes())) / 1e9, 1)   # gigabytes (plan_size is in bytes)
                      for m in catalog.MODE_ROLES if m not in self.modes()}
         return web.json_response({
-            **base, "online": True, "modes": self.modes(), "add_modes": add_modes, "hf_mirror": bool(self.config.get("hf_mirror")), "live_preview": bool(self.config.get("live_preview", True)),
+            **base, "online": True, "cpu_only": str(dev.get("type", "")).lower() == "cpu", "modes": self.modes(), "add_modes": add_modes, "hf_mirror": bool(self.config.get("hf_mirror")), "live_preview": bool(self.config.get("live_preview", True)),
             "offer_modes": [{"mode": m, "gb": add_modes[m]} for m in catalog.OFFER_MODES
                             if m in add_modes and m not in (self.config.get("offered_modes") or [])],
             "gpu": gpu_name(dev.get("name", "")),
@@ -940,12 +1079,15 @@ class App:
         notes = catalog.compat_notes(mode, role, name or self.model_names.get(role, ""), self.hw.get("compute_cap") or 0)
         missing = {m["role"] for m in self.missing}
         picked = self.config.get("model_pick") or {}
+        ov, seen = self.config.get("lora_strengths") or {}, self.config.get("lora_seen") or {}
+        def lkey(n):
+            return str(n or "").replace("/", "\\").split("\\")[-1].lower()
         loras = [{"title": catalog.ROLE_TITLES.get(r, r), "name": self.model_names.get(r, ""), "have": r not in missing,
-                  "must": r in catalog.MODE_ROLES.get(mode, []), "mine": r in picked}
+                  "must": r in catalog.MODE_ROLES.get(mode, []), "mine": r in picked,
+                  "strength": ov.get(lkey(self.model_names.get(r))), "default": seen.get(lkey(self.model_names.get(r)))}
                  for r in catalog.MODE_ROLES.get(mode, []) + catalog.MODE_OPTIONAL.get(mode, []) if r.endswith("_lora") and r in self.model_names]
-        loras += [{"title": "Своя LoRA", "name": x["file"], "have": True, "must": False, "mine": True, "custom": True, "off": mode in (x.get("skip") or [])}
-                  for x in self.unique_loras() if x.get("on", True)]
-        return web.json_response({"notes": [{"level": lv, "text": t} for lv, t in notes], "loras": loras,
+        custom = [{"file": x["file"], "strength": float(x.get("strength", 0.8)), "here": self.lora_here(x, mode)} for x in self.unique_loras()]
+        return web.json_response({"notes": [{"level": lv, "text": t} for lv, t in notes], "loras": loras, "custom": custom, "tune": (self.config.get("image_tune") or {}).get(mode) or {},
                                   "picked": picked.get(role), "name": self.model_names.get(role)})
 
     async def h_models_pick(self, req):
@@ -1541,6 +1683,14 @@ class App:
                 code, out = await asyncio.to_thread(run)
             except Exception as e:
                 code, out = -1, f"{type(e).__name__}: {e}"
+            try:   # an update can leave the processor-only PyTorch behind: check it before the start
+                if self.hw is None:
+                    self.hw = await asyncio.to_thread(engine.detect_hardware)
+                st = await self.torch_state()
+                if st and not st[1] and (self.hw or {}).get("compute_cap"):
+                    await self.fix_torch()
+            except Exception as e:
+                print(f"PyTorch check after update: {type(e).__name__}: {e}", file=sys.stderr)
             self.start_managed()
             try:
                 await self.wait_comfy()
@@ -2036,6 +2186,7 @@ class App:
         if rh:
             return await self.queue_cloud(rh, graph, stages, meta)
         await self.stop_llm()  # the agent's model and H3 do not fit in VRAM together
+        self.apply_lora_strengths(graph)
         mode_key = (meta or {}).get("mode", "")
         # the animated live preview («see what comes out, stop in time») in the video modes that have none of their own; one switch in Settings
         if mode_key in ("video", "lipsync", "refs", "actor", "swap") and self.config.get("live_preview", True) \
@@ -2447,6 +2598,7 @@ class App:
         if engine == "flux":
             await self.need_models("flux")
             graph, stages = wf.flux_t2i_graph(self.model_names, prompt, width, height, seed)
+            graph = self.with_loras(graph, "flux")
             return await self.queue(graph, stages, {
                 "mode": "krea", "sub": "Изображение (FLUX.2)", "prompt": prompt, "aspect": aspect, "q": "1K",
                 "len": 0.0, "res": f"{width}×{height}", "seed": seed, **lab})
@@ -2455,12 +2607,14 @@ class App:
             mp = wf.H3IMG_MP.get(form.get("mp", "4"), 4.0)
             width, height = round_size(form, high=8192, max_px=H3IMG_MAX_PX) or wf.h3img_size(aspect, mp)   # the own size is not cut to 2 MP here
             graph, stages = wf.h3img_t2i_graph(self.model_names, prompt, width, height, seed)
+            graph = self.with_loras(graph, "h3img")
             return await self.queue(graph, stages, {
                 "mode": "krea", "sub": "Изображение (MiniMax H3 Image)", "prompt": prompt, "aspect": aspect, "q": f"{mp:g} МП",
                 "len": 0.0, "res": f"{width}×{height}", "seed": seed, **lab})
         if engine == "qwen":
             await self.need_models("qwen")
             graph, stages = wf.qwen_t2i_graph(self.model_names, prompt, form.get("negative", "").strip()[:600], width, height, seed)
+            graph = self.with_loras(graph, "qwen")
             return await self.queue(graph, stages, {
                 "mode": "krea", "sub": "Изображение (Qwen 2.1)", "prompt": prompt, "aspect": aspect, "q": "1K",
                 "len": 0.0, "res": f"{width}×{height}", "seed": seed, **lab})
@@ -2472,6 +2626,7 @@ class App:
                 "mode": "krea", "sub": "Изображение: реализм", "prompt": prompt, "aspect": aspect, "q": "4K" if scale > 2 else "2K",
                 "len": 0.0, "res": f"{int(width * scale)}×{int(height * scale)}", "seed": seed, **lab})
         graph, stages = wf.krea_graph(self.model_names, prompt, width, height, seed)
+        graph = self.with_loras(graph, "krea")
         return await self.queue(graph, stages, {
             "mode": "krea", "sub": "Изображение по тексту", "prompt": prompt, "aspect": aspect, "q": "1K",
             "len": 0.0, "res": f"{width}×{height}", "seed": seed, **lab})
@@ -2554,6 +2709,7 @@ class App:
             size = round_size(form, high=8192, max_px=H3IMG_MAX_PX) or (wf.h3img_size(form["aspect"], mp) if form.get("aspect") else None)
             refs = [image] + list(form.get("_extra") or [])
             graph, stages = wf.h3img_edit_graph(self.model_names, prompt, refs, mp, seed, size, min(mp, 4.0))
+            graph = self.with_loras(graph, "h3img")
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": f"Правка (MiniMax H3 Image, картинок: {len(refs)})", "prompt": prompt, "aspect": form.get("aspect", ""),
                 "q": f"{mp:g} МП", "len": 0.0, "res": "%d×%d" % size if size else "", "seed": seed})
@@ -2563,6 +2719,7 @@ class App:
                 raise web.HTTPBadRequest(text="Напишите, что изменить на изображении")
             mp = wf.QWEN_MP.get(form.get("size", "1"), 1.0)
             graph, stages = wf.flux_edit_graph(self.model_names, prompt, image, mp, seed, form.get("_extra") or (), round_size(form))
+            graph = self.with_loras(graph, "flux")
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Правка изображения (FLUX.2)", "prompt": prompt, "aspect": "",
                 "q": "", "len": 0.0, "res": "", "seed": seed})
@@ -2572,9 +2729,9 @@ class App:
             kw = {"mp": sheet_mp} if h3 else {}
             graph, stages, prompt = (wf.h3img_sheet_graph if h3 else wf.qwen_sheet_graph)(
                 self.model_names, image, seed, headless=form.get("headless", "1") != "0",
-                background=form.get("background", "grey"), marks=form.get("marks", "")[:300], panels=panels, **kw)
+                background=form.get("background", "grey"), marks=form.get("marks", "")[:300], panels=panels, desc=form.get("prompt", "")[:1500], **kw)
             sub, res = "Лист персонажа", "%d×%d" % (wf.h3img_size("11:5" if panels == 6 else "16:9", sheet_mp) if h3 else (wf.SHEET6_SIZE if panels == 6 else wf.SHEET_SIZE))
-            prompt = "Лист персонажа" + (" (6 панелей)" if panels == 6 else "") + (": " + form["marks"].strip()[:80] if form.get("marks", "").strip() else "")
+            prompt = "Лист персонажа" + (" (6 панелей)" if panels == 6 else "") + (": " + (form.get("prompt", "").strip() or form.get("marks", "").strip())[:80] if (form.get("prompt", "").strip() or form.get("marks", "").strip()) else "")
         else:
             prompt = form.get("prompt", "").strip()
             if not prompt:
@@ -2582,6 +2739,7 @@ class App:
             mp = wf.QWEN_MP.get(form.get("size", "1"), 1.0)
             size = round_size(form) or wf.qwen_edit_size(form.get("aspect", ""), mp)
             graph, stages = wf.qwen_edit_graph(self.model_names, prompt, image, mp, seed, size, form.get("_extra") or ())
+            graph = self.with_loras(graph, "qwen")
             sub, res = "Правка изображения", ("%d×%d" % size if size else "")
         return await self.queue(graph, stages, {
             "mode": "qwen", "sub": sub, "prompt": prompt, "aspect": form.get("aspect", "") if form.get("kind") != "sheet" else "",
@@ -2684,7 +2842,82 @@ class App:
         A LoRA can be switched off in single modes (right in the mode, in the «Модель» row): its `skip` lists those modes."""
         if self.rh() or self.locked():   # «Я новичок»: only the LoRAs of the ready workflows
             return []
-        return [(x["file"], float(x["strength"])) for x in self.unique_loras() if x.get("on", True) and mode not in (x.get("skip") or [])]
+        return [(x["file"], float(x["strength"])) for x in self.unique_loras() if self.lora_here(x, mode)]
+
+    @staticmethod
+    def lora_here(x, mode):
+        """Is an own LoRA on in this mode. A LoRA added from a mode block has `use` (the modes it works in: a new one works NOWHERE else);
+        the older ones (added on the Models screen) keep their rule: on everywhere except the modes of `skip`."""
+        if "use" in x:
+            return mode in (x.get("use") or [])
+        return bool(x.get("on", True)) and mode not in (x.get("skip") or [])
+
+    def with_loras(self, graph, mode):
+        """A picture graph with the user's own LoRAs of this mode (krea / flux / qwen / h3img) and the user's own CFG / steps of that model."""
+        graph = wf.add_loras(graph, self.custom_loras(mode))
+        t = (self.config.get("image_tune") or {}).get(mode) or {}
+        if not (self.rh() or self.locked()) and (t.get("cfg") is not None or t.get("steps") is not None):
+            wf.tune_sampling(graph, t.get("cfg"), t.get("steps"))
+        return graph
+
+    async def h_image_tune(self, req):
+        """CFG and steps of a picture model, set in the «Модели и LoRA» block; empty = as the program has it."""
+        body = await req.json()
+        mode = body.get("mode")
+        if mode not in ("krea", "flux", "qwen", "h3img"):
+            raise web.HTTPBadRequest(text="Неизвестная модель")
+        def num(key, lo, hi, cast):
+            v = body.get(key)
+            if v in (None, ""):
+                return None
+            try:
+                return max(lo, min(hi, cast(float(v))))
+            except (TypeError, ValueError):
+                return None
+        tune = dict(self.config.get("image_tune") or {})
+        tune[mode] = {"cfg": num("cfg", 0.0, 20.0, float), "steps": num("steps", 1, 80, int)}
+        if tune[mode]["cfg"] is None and tune[mode]["steps"] is None:
+            tune.pop(mode)
+        self.config.update(image_tune=tune)
+        return web.json_response({"ok": True, "tune": tune.get(mode) or {}})
+
+    async def h_lora_strength(self, req):
+        """The strength of a LoRA the program puts in itself (speed-up, realism...): set by the user, empty = as the program has it."""
+        body = await req.json()
+        key = str(body.get("file") or "").replace("/", "\\").split("\\")[-1].lower()
+        if not key:
+            raise web.HTTPBadRequest(text="Не указана LoRA")
+        ov = dict(self.config.get("lora_strengths") or {})
+        v = body.get("value")
+        if v in (None, ""):
+            ov.pop(key, None)
+        else:
+            try:
+                ov[key] = max(-4.0, min(4.0, float(v)))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="Сила LoRA должна быть числом")
+        self.config.update(lora_strengths=ov)
+        return web.json_response({"ok": True})
+
+    def apply_lora_strengths(self, graph):
+        """The user's strengths for the program's own LoRAs go into every LoRA node of the graph; the strength the program had is remembered to show it."""
+        ov, seen = self.config.get("lora_strengths") or {}, dict(self.config.get("lora_seen") or {})
+        changed = False
+        for v in graph.values():
+            if v.get("class_type") not in ("LoraLoaderModelOnly", "LoraLoader"):
+                continue
+            inp = v.get("inputs", {})
+            name = inp.get("lora_name")
+            if not isinstance(name, str):
+                continue
+            key = name.replace("/", "\\").split("\\")[-1].lower()
+            if key in ov and not (self.rh()):
+                inp["strength_model"] = ov[key]
+            elif isinstance(inp.get("strength_model"), (int, float)) and seen.get(key) != inp["strength_model"]:
+                seen[key] = inp["strength_model"]
+                changed = True
+        if changed:
+            self.config.update(lora_seen=seen)
 
     def unique_loras(self):
         """The user's own LoRAs, one entry per file (older versions let one file be added several times: it was mixed in again and again)."""
@@ -2696,7 +2929,59 @@ class App:
                 out.append(x)
         return out
 
-    async def h_loras_custom(self, _req):
+    # which model a LoRA is made for: the family of the mode it is used in
+    LORA_FAMILY_OF_MODE = {"krea": "krea", "kreareal": "krea", "flux": "flux", "qwen": "qwen", "h3img": "h3img",
+                           "video": "h3video", "lipsync": "h3video", "refs": "h3video", "actor": "h3video", "swap": "h3video", "long": "h3video", "action": "h3video"}
+
+    @staticmethod
+    def lora_family_guess(text):
+        """The model a LoRA file is for, by its folder / file name / the model written in the file (None = cannot tell)."""
+        t = re.sub(r"[^a-z0-9]+", " ", str(text or "").lower())
+        if re.search(r"krea", t):
+            return "krea"
+        if re.search(r"flux", t):
+            return "flux"
+        if re.search(r"qwen", t):
+            return "qwen"
+        if re.search(r"minimax|h3", t):
+            return "h3img" if re.search(r"image|img|t2i", t) and not re.search(r"video|fl2v|ref2v|ref2va|fl2va|i2v|t2v|r2v", t) else "h3video"
+        return None
+
+    def lora_header_text(self, name):
+        """What the LoRA file says about its base model (the metadata of the .safetensors header), '' when the file is not at hand."""
+        cache = self.__dict__.setdefault("_lora_meta", {})
+        if name in cache:
+            return cache[name]
+        out = ""
+        roots = []
+        ext = (self.config.get("ext_models_dir") or "").strip()
+        if ext:
+            roots.append(Path(ext) / "loras")
+        own = self.config.get("own_comfy_dir") or self.config.get("install_dir")
+        if own:
+            roots.append(Path(own) / "ComfyUI" / "models" / "loras")
+        for r in roots:
+            f = r / name.replace("/", os.sep).replace(chr(92), os.sep)
+            try:
+                if f.is_file():
+                    with open(f, "rb") as fh:
+                        n = struct.unpack("<Q", fh.read(8))[0]
+                        if n < 4_000_000:
+                            md = (json.loads(fh.read(n)) or {}).get("__metadata__") or {}
+                            out = " ".join(str(md.get(k, "")) for k in ("ss_base_model_version", "base_model", "modelspec.architecture", "modelspec.title"))
+                    break
+            except (OSError, ValueError, struct.error):
+                pass
+        cache[name] = out
+        return out
+
+    def lora_family(self, name):
+        mine = (self.config.get("lora_family") or {}).get(name)
+        if mine:
+            return mine
+        return self.lora_family_guess(name) or self.lora_family_guess(self.lora_header_text(name))
+
+    async def h_loras_custom(self, req):
         try:
             _, files = await self.comfy_json("GET", "/models/loras")
         except Exception:
@@ -2704,25 +2989,34 @@ class App:
         items = self.unique_loras()
         if len(items) != len(self.config.get("custom_loras") or []):
             self.config.update(custom_loras=items)   # the doubles are removed for good
-        return web.json_response({"files": files or [], "items": items})
+        mode = req.query.get("mode", "")
+        fam = self.LORA_FAMILY_OF_MODE.get(mode)
+        lst = [{"file": f, "family": await asyncio.to_thread(self.lora_family, f)} for f in (files or [])]
+        return web.json_response({"files": files or [], "items": items, "family": fam, "list": lst})
 
     async def h_loras_custom_set(self, req):
         if self.locked():
             raise web.HTTPForbidden(text="В режиме «Я новичок» свои LoRA не подключаются: всё уже настроено.")
         items = []
-        for x in (await req.json()).get("items", [])[:10]:
+        for x in (await req.json()).get("items", [])[:60]:
             try:
                 strength = max(-4.0, min(4.0, float(x.get("strength", 0.8))))
             except (TypeError, ValueError):
                 strength = 0.8
             if isinstance(x.get("file"), str) and x["file"]:
                 skip = [m for m in (x.get("skip") or []) if m in catalog.MODE_ROLES][:20]
-                items.append({"file": x["file"], "strength": strength, "on": bool(x.get("on", True)), "skip": skip})
+                item = {"file": x["file"], "strength": strength, "on": bool(x.get("on", True)), "skip": skip}
+                if "use" in x:
+                    item["use"] = [m for m in (x.get("use") or []) if m in catalog.MODE_ROLES][:20]
+                items.append(item)
         self.config.update(custom_loras=items)
         return web.json_response({"ok": True})
 
     async def h_loras_custom_mode(self, req):
-        """Switch an own LoRA on / off for ONE mode (from the «Модель» row of that mode)."""
+        """The «Модели и LoRA» block of a mode: switch an own LoRA on / off for THIS mode, set its strength, or add a file from the ComfyUI folder
+        (`create`: a LoRA that is new to the program works only in this mode until it is switched on somewhere else)."""
+        if self.locked():
+            raise web.HTTPForbidden(text="В режиме «Я новичок» свои LoRA не подключаются: всё уже настроено.")
         body = await req.json()
         file, mode = body.get("file"), body.get("mode")
         if mode not in catalog.MODE_ROLES:
@@ -2730,11 +3024,29 @@ class App:
         items = self.unique_loras()
         hit = next((x for x in items if x.get("file") == file), None)
         if not hit:
-            raise web.HTTPBadRequest(text="Такой LoRA нет в списке")
-        skip = [m for m in (hit.get("skip") or []) if m != mode]
-        if not body.get("on"):
-            skip.append(mode)
-        hit["skip"] = skip
+            if not (body.get("create") and isinstance(file, str) and file):
+                raise web.HTTPBadRequest(text="Такой LoRA нет в списке")
+            if len(items) >= 60:
+                raise web.HTTPBadRequest(text="Своих LoRA уже 60: уберите ненужные на экране «Модели»")
+            hit = {"file": file, "strength": 0.8, "on": True, "skip": [], "use": []}
+            items.append(hit)
+            fam = self.LORA_FAMILY_OF_MODE.get(mode)
+            if fam and body.get("assign") and not self.lora_family(file):   # taken from the full list: the program remembers it is for this model
+                lf = dict(self.config.get("lora_family") or {})
+                lf[file] = fam
+                self.config.update(lora_family=lf)
+        if "use" not in hit:   # an older LoRA: its modes become an explicit list, the behaviour stays the same
+            hit["use"] = [m for m in catalog.MODE_ROLES if self.lora_here(hit, m)]
+        if body.get("strength") is not None:
+            try:
+                hit["strength"] = max(-4.0, min(4.0, float(body["strength"])))
+            except (TypeError, ValueError):
+                pass
+        if "on" in body:
+            use = [m for m in hit["use"] if m != mode]
+            if body.get("on"):
+                use.append(mode)
+            hit["use"] = use
         self.config.update(custom_loras=items)
         return web.json_response({"ok": True})
 
@@ -3093,16 +3405,27 @@ class App:
                     "prompt": scenes[k][0], "aspect": aspect, "q": quality,
                     "len": round((plan[k]["total"] - plan[k]["ov"]) / wf.FPS, 1), "res": f"{width}×{height}", "seed": seed,
                     "long": {"run": run, "part": k, "n": len(scenes), "draft": False, "test": test, "kind": "action"}})
+            end_state = None   # redoing ONE scene whose next scene is already made: the end of the old version is kept, the join to the next scene stays
+            if form.get("anchor") == "1" and not test and k + 1 < len(scenes) and not fresh[k + 1]:
+                old_end, old_next = LONG_DIR / run / f"state_{k}{sfx}.latent", LONG_DIR / run / f"state_{k + 1}{sfx}.latent"
+                if old_end.exists() and old_next.exists():
+                    try:
+                        was_res = json.loads(old_end.with_suffix(".json").read_text(encoding="utf-8")).get("res")
+                    except (OSError, ValueError):
+                        was_res = None
+                    if not was_res or was_res == f"{width}×{height}":
+                        end_state = await self.upload_state(old_end, f"h3s_long_{run}_{k}_end{sfx}.latent")
             graph, stages = wf.long_part_graph(self.model_names, scenes, k, width, height, seed, images, audio, start,
                                                dmad if draft else fin, extras, "match", vocals, state,
                                                await self.preview_opts("long") if form.get("preview") != "0" else None, cont, form.get("src_project") == "1", fresh, draft, rvids,
-                                               quiet=form.get("quiet") == "1", audios=sc_ar[k])
+                                               quiet=form.get("quiet") == "1", audios=sc_ar[k], end_state=end_state)
             plan = wf.long_plan([sc[1] for sc in scenes], cont_first=bool(cont) or form.get("src_project") == "1", fresh=fresh)
+            anchored = bool(end_state) and wf.can_anchor(plan[k]["total"], 0 if ((k == 0 and not cont) or (k < len(fresh) and fresh[k])) else plan[k]["ov"], plan[k + 1]["ov"])
             sub = f"сцена {k + 1} из {len(scenes)}" + (" · музыка" if audio else " · звук от модели")
             return await self.queue(graph, stages, {
                 "mode": "long", "sub": sub + (" · черновик" if draft else f" · проба {width}×{height}" if test else ""), "prompt": scenes[k][0], "aspect": aspect, "q": quality,
                 "len": round((plan[k]["total"] - plan[k]["ov"]) / wf.FPS, 1), "res": f"{width}×{height}", "seed": seed,
-                "long": {"run": run, "part": k, "n": len(scenes), "draft": draft, "test": test}})
+                "long": {"run": run, "part": k, "n": len(scenes), "draft": draft, "test": test, "anchored": anchored}})
         graph, stages = wf.long_graph(self.model_names, scenes, width, height, seed, images, audio, start,
                                       dmad if draft else fin, extras, "match", vocals, await self.preview_opts("long") if form.get("preview") != "0" else None, fresh, False, draft, rvids, (rm_a + arefs)[:3])
         run = re.sub(r"[^A-Za-z0-9]", "", form.get("run", ""))[:32]
@@ -3136,8 +3459,7 @@ class App:
                 raise web.HTTPBadRequest(text="Не удалось найти один из клипов: он удалён с диска?")
             return await r.read()
 
-    async def h_montage(self, req):
-        """Join library clips in the given order with ComfyUI (no ffmpeg in the app)."""
+    async def _montage_form(self, req):
         form, files, music_bytes, aud_files = {}, {}, None, {}
         async for field in await req.multipart():
             if field.name.startswith("file_"):   # a clip taken from the user's computer
@@ -3148,6 +3470,206 @@ class App:
                 aud_files[field.name[4:]] = (field.filename or "audio.wav", bytes(await field.read()))
             else:
                 form[field.name] = await field.text()
+        return form, files, music_bytes, aud_files
+
+    def ffmpeg(self):
+        return vmix.find_ffmpeg(ROOT)
+
+    async def h_export_to(self, req):
+        """Copy a Library file into a folder the user chose (the montage's «where to save»)."""
+        b = await req.json()
+        item = self.library.get(str(b.get("id") or ""))
+        folder = Path(str(b.get("dir") or ""))
+        if not item or not folder.is_dir():
+            return web.json_response({"error": "Папка не найдена"}, status=400)
+        name = re.sub(r'[\/:*?"<>|]+', "_", str(b.get("name") or "")).strip() or f"{item['id']}.{item.get('ext') or 'mp4'}"
+        dest, k = folder / name, 1
+        while dest.exists():
+            dest = folder / f"{Path(name).stem} ({k}){Path(name).suffix}"
+            k += 1
+        try:
+            src = self.file_path(item)
+            if src and src.exists():
+                await asyncio.to_thread(shutil.copy2, src, dest)
+            else:
+                dest.write_bytes(await self.item_bytes(item))
+        except OSError as e:
+            return web.json_response({"error": f"Не удалось сохранить: {e}"}, status=500)
+        return web.json_response({"ok": True, "path": str(dest)})
+
+    async def h_thumb(self, req):
+        """A small picture of a Library video (made once, kept in data/thumbs): the Library list does not open the videos themselves."""
+        iid = re.sub(r"[^A-Za-z0-9_-]", "", req.match_info["id"])[:40]
+        item = self.library.get(iid)
+        ff = self.ffmpeg()
+        if not item or not ff or item.get("kind") == "image":
+            raise web.HTTPNotFound()
+        dest = DATA_DIR / "thumbs" / f"{iid}.jpg"
+        if not dest.exists():
+            src, tmp = self.file_path(item), None
+            if not (src and src.exists()):
+                try:
+                    tmp = DATA_DIR / "thumbs" / f"{iid}.src"
+                    tmp.parent.mkdir(parents=True, exist_ok=True)
+                    tmp.write_bytes(await self.item_bytes(item))
+                    src = tmp
+                except Exception:
+                    raise web.HTTPNotFound()
+            if not hasattr(self, "_thumb_sem"):
+                self._thumb_sem = asyncio.Semaphore(2)
+            async with self._thumb_sem:
+                ok = dest.exists() or await vmix.thumb(ff, str(src), dest)
+            if tmp:
+                tmp.unlink(missing_ok=True)
+            if not ok:
+                raise web.HTTPNotFound()
+        return web.FileResponse(dest, headers={"Cache-Control": "max-age=604800"})
+
+    async def h_ffmpeg(self, _req):
+        ff = self.ffmpeg()
+        return web.json_response({"ok": bool(ff), "encoder": await asyncio.to_thread(vmix.encoder, ff) if ff else ""})
+
+    async def h_montage_ff(self, req):
+        """The whole montage in one ffmpeg pass: join, trim, colour, grain, sound tracks. Runs in the background; progress goes to the page."""
+        ff = self.ffmpeg()
+        if not ff:
+            raise web.HTTPBadRequest(text="ffmpeg не найден")
+        form, files, music_bytes, aud_files = await self._montage_form(req)
+        try:
+            ids = [i for i in json.loads(form.get("ids") or "[]") if isinstance(i, str)][:30]
+            durs = json.loads(form.get("durs") or "[]")
+            starts_raw = json.loads(form.get("starts") or "[]")
+            mute = [bool(x) for x in json.loads(form.get("mute") or "[]")]
+            looks = json.loads(form.get("looks") or "[]")
+            wanted = [x for x in json.loads(form.get("atracks") or "[]") if isinstance(x, dict)][:40]
+        except ValueError:
+            raise web.HTTPBadRequest(text="Неверные данные монтажа")
+        try:
+            grain = min(100.0, max(0.0, float(form.get("grain") or 0)))
+        except ValueError:
+            grain = 0.0
+        quality = form.get("quality") if form.get("quality") in ("high", "normal", "small") else "normal"
+        no_audio = form.get("noaudio") == "1"
+        pid = "ff" + uuid.uuid4().hex[:10]
+        jobdir = DATA_DIR / "tmp_mix" / pid
+        jobdir.mkdir(parents=True, exist_ok=True)
+        try:
+            clips, first_item = [], None
+            for n_, i in enumerate(ids):
+                if i.startswith("up:"):
+                    k = i[3:]
+                    if k not in files:
+                        raise web.HTTPBadRequest(text="Файл с компьютера не дошёл до программы, добавьте его ещё раз")
+                    it, data, path = {"kind": "video"}, files[k][1], jobdir / f"c{n_}{Path(files[k][0]).suffix or '.mp4'}"
+                    path.write_bytes(data)
+                else:
+                    it = self.library.get(i)
+                    if not it or it.get("kind") == "image":
+                        raise web.HTTPBadRequest(text="Добавьте только видео")
+                    data = await self.item_bytes(it)
+                    lp = self.file_path(it)
+                    if lp and lp.exists():
+                        path = lp
+                    else:
+                        path = jobdir / f"c{n_}.{it.get('ext') or 'mp4'}"
+                        path.write_bytes(data)
+                first_item = first_item or it
+                tr = mp4info.track_seconds(data)
+                full = tr.get("vide") or float(it.get("len") or 0)
+                s_ = starts_raw[n_] if n_ < len(starts_raw) and isinstance(starts_raw[n_], (int, float)) and 0 < starts_raw[n_] < 3600 else 0.0
+                cut = durs[n_] if n_ < len(durs) and isinstance(durs[n_], (int, float)) and 0.3 <= durs[n_] < 3600 else None
+                dur = min(max(0.1, full - s_), cut) if cut and full else (cut or max(0.1, full - s_))
+                clips.append({"path": str(path), "start": float(s_), "dur": float(dur), "has_audio": bool(tr.get("soun")),
+                              "mute": mute[n_] if n_ < len(mute) else False,
+                              "look": looks[n_] if n_ < len(looks) and isinstance(looks[n_], dict) else {}})
+            if len(clips) < 2:
+                raise web.HTTPBadRequest(text="Добавьте хотя бы два видео")
+            for c in clips:   # colour sliders come as percent from the page
+                lk = c["look"]
+                for key in ("bright", "contrast", "sat"):
+                    lk[key] = float(lk.get(key, 100)) / 100
+            size = vmix.probe(ff, clips[0]["path"])
+            if not size:
+                raise web.HTTPBadRequest(text="Не удалось прочитать первый клип")
+            W, H, fps = size[0] - size[0] % 2, size[1] - size[1] % 2, size[2]
+            total = sum(c["dur"] for c in clips)
+            tracks = []
+            if not no_audio:
+                for j, x_ in enumerate(wanted):
+                    try:
+                        src_ = str(x_.get("src") or "")
+                        if src_.startswith("lib:"):
+                            a_item = self.library.get(src_[4:])
+                            if not a_item or a_item.get("kind") == "image":
+                                continue
+                            a_data = await self.item_bytes(a_item)
+                            ext = a_item.get("ext") or "mp4"
+                        elif src_ in aud_files:
+                            a_data, ext = aud_files[src_][1], (Path(aud_files[src_][0]).suffix.lstrip(".").lower() or "wav")[:5]
+                        else:
+                            continue
+                        if ext in ("mp4", "mov", "webm", "mkv") and not mp4info.track_seconds(a_data).get("soun"):
+                            continue
+                        ap = jobdir / f"a{j}.{ext}"
+                        ap.write_bytes(a_data)
+                        dur = float(x_.get("dur") or 0)
+                        if dur > 0:
+                            tracks.append({"path": str(ap), "at": float(x_.get("at") or 0), "a": float(x_.get("a") or 0), "dur": dur, "vol": float(x_.get("vol") or 0)})
+                    except (TypeError, ValueError):
+                        continue
+                if music_bytes:   # the song of a music clip goes under the whole video
+                    try:
+                        m_start = max(0.0, float(form.get("music_start") or 0))
+                    except ValueError:
+                        m_start = 0.0
+                    mp = jobdir / "music.wav"
+                    mp.write_bytes(music_bytes)
+                    tracks.append({"path": str(mp), "at": 0.0, "a": m_start, "dur": total, "vol": 0.0})
+            iid = uuid.uuid4().hex[:12]
+            now = datetime.now()
+            d = self.results_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            dest = d / f"{now.strftime('%Y%m%d')}_{iid}_montage.mp4"
+            args = vmix.build_args(ff, jobdir, clips, (W, H), fps, tracks, grain, quality, no_audio, dest)
+        except Exception:
+            shutil.rmtree(jobdir, ignore_errors=True)
+            raise
+        meta = {"mode": "montage", "sub": f"{len(clips)} клипов", "prompt": "", "aspect": (first_item or {}).get("aspect", ""), "q": "",
+                "len": round(total, 1), "res": f"{W}×{H}", "seed": 0}
+        self.ff_procs[pid] = {}
+        asyncio.create_task(self._montage_ff_run(ff, args, pid, jobdir, dest, iid, now, meta, total))
+        return web.json_response({"prompt_id": pid})
+
+    async def _montage_ff_run(self, ff, args, pid, jobdir, dest, iid, now, meta, total):
+        box = self.ff_procs[pid]
+
+        async def prog(x):
+            await self.broadcast({"type": "ffprog", "prompt_id": pid, "pct": round(x * 100), "text": f"Записываем видео: {round(x * 100)}%"})
+        try:
+            await self.broadcast({"type": "ffprog", "prompt_id": pid, "pct": 0, "text": "Склеиваем и записываем видео…"})
+            rc, tail = await vmix.run(ff, args, total, prog, box)
+            if box.get("stopped"):
+                dest.unlink(missing_ok=True)
+                await self.broadcast({"type": "interrupted", "prompt_id": pid})
+            elif rc != 0 or not dest.exists():
+                dest.unlink(missing_ok=True)
+                self.note_error(f"ffmpeg: {tail}")
+                await self.broadcast({"type": "error", "prompt_id": pid, "message": "не удалось записать видео. " + (tail.splitlines()[-1] if tail else "")})
+            else:
+                item = dict(meta, id=iid, prompt_id=pid, date=now.isoformat(timespec="seconds"), fav=False, ext="mp4",
+                            file={"type": "local", "path": str(dest), "filename": dest.name})
+                self.library.add(item)
+                await self.broadcast({"type": "done", "prompt_id": pid, "item": self.public(item), "items": [self.public(item)]})
+        except Exception as e:
+            dest.unlink(missing_ok=True)
+            await self.broadcast({"type": "error", "prompt_id": pid, "message": str(e) or "ошибка при записи видео"})
+        finally:
+            self.ff_procs.pop(pid, None)
+            shutil.rmtree(jobdir, ignore_errors=True)
+
+    async def h_montage(self, req):
+        """Join library clips in the given order with ComfyUI (no ffmpeg in the app)."""
+        form, files, music_bytes, aud_files = await self._montage_form(req)
         try:
             ids = [i for i in json.loads(form.get("ids") or "[]") if isinstance(i, str)][:30]
         except ValueError:
@@ -3274,10 +3796,12 @@ class App:
                 return default
         strength = num("strength", 0.0, 0.0, 100.0) / 100
         look = {"bright": num("bright", 100.0, 0.0, 200.0) / 100, "contrast": num("contrast", 100.0, 0.0, 200.0) / 100,
-                "sat": num("sat", 100.0, 0.0, 200.0) / 100}
+                "sat": num("sat", 100.0, 0.0, 200.0) / 100,
+                "temp": num("temp", 0.0, -100.0, 100.0), "tint": num("tint", 0.0, -100.0, 100.0),
+                "black": num("black", 0.0, -100.0, 100.0), "white": num("white", 0.0, -100.0, 100.0), "lmid": num("lmid", 0.0, -100.0, 100.0)}   # levels: black point, white point (0..255), midtones shift   # temp: cold (-) .. warm (+); tint: green (-) .. magenta (+)
         want_match = form.get("match") == "1" and bool(form.get("match_id") or ref_bytes)
         look["match"] = num("ms", 100.0, 0.0, 100.0) / 100 if want_match else 0.0
-        color_on = look["match"] > 0 or any(abs(look[k] - 1.0) > 0.005 for k in ("bright", "contrast", "sat"))
+        color_on = look["match"] > 0 or any(abs(look[k] - 1.0) > 0.005 for k in ("bright", "contrast", "sat")) or abs(look["temp"]) > 0.5 or abs(look["tint"]) > 0.5 or abs(look["black"]) > 0.5 or abs(look["white"]) > 0.5 or abs(look["lmid"]) > 0.5
         if strength <= 0 and not color_on:
             raise web.HTTPBadRequest(text="Зерно и цвет выключены")
         if self.rh():
@@ -3293,6 +3817,11 @@ class App:
             need.append(("AdjustContrast", "контраста", "ComfyUI (обновите его)"))
         if abs(look["sat"] - 1.0) > 0.005:
             need.append(("JWImageSaturation", "насыщенности", "comfyui-various"))
+        if abs(look["black"]) > 0.5 or abs(look["white"]) > 0.5 or abs(look["lmid"]) > 0.5:
+            need.append(("Image Levels Adjustment", "чёрной и белой точек", "was-node-suite-comfyui (WAS Node Suite)"))
+        if abs(look["temp"]) > 0.5 or abs(look["tint"]) > 0.5:
+            need.append(("ImageBlend", "температуры и оттенка", "ComfyUI (обновите его)"))
+            need.append(("EmptyImage", "температуры и оттенка", "ComfyUI (обновите его)"))
         for node, what, pack in need:
             try:
                 status, info = await self.comfy_json("GET", f"/object_info/{node}", timeout=aiohttp.ClientTimeout(total=15))
@@ -3340,6 +3869,800 @@ class App:
         return await self.queue(graph, stages, {
             "mode": "montage", "sub": ("Цвет и зерно" if color_on and strength > 0 else "Цвет" if color_on else "Зерно плёнки"), "prompt": (item.get("prompt") or name or "")[:100], "aspect": item.get("aspect", ""), "q": "",
             "len": ln, "res": item.get("res", ""), "seed": 0}, last_output=True)
+
+    # ---------- 3D model from one picture: TripoSplat («Точно») and Trellis 2 («Чисто»); her two ComfyUI graphs in graphs3d/ ----------
+
+    TD_DIR = "3D-модели"
+    TD_FOLDERS = {"UNETLoader": "diffusion_models", "CLIPVisionLoader": "clip_vision", "VAELoader": "vae", "LoadBackgroundRemovalModel": "background_removal"}
+    S_TOOLS_SHA = "7a3bc7f8acd2f495aac7e27d14fc2a51b703d2e2"   # sofiakholina-s_tools 1.0.1, read through before it was added (no network, no pip, no exec)
+    S_TOOLS_ZIP = "https://codeload.github.com/sofiakholina/sofiakholina-s_tools/zip/" + S_TOOLS_SHA
+
+    def td_dest(self):
+        """The folder of the finished models: the one the user typed, else next to the ComfyUI results."""
+        d = str(self.config.get("td_dir") or "").strip().strip('"')
+        if d:
+            return Path(d)
+        out = getattr(self, "output_dir", None)
+        return (Path(out) / "3D") if out else self.results_dir() / self.TD_DIR
+
+    def td_staging(self):
+        d = self.results_dir() / ".3d_tmp"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    async def td_check(self):
+        """What is missing for each variant: nodes (class names) and model files. None for nodes when ComfyUI does not answer."""
+        classes = sorted({c for v in wf.TD_NODES.values() for c in v})
+
+        async def one(cls):
+            try:
+                status, d = await self.comfy_json("GET", f"/object_info/{cls}", timeout=aiohttp.ClientTimeout(total=15))
+                return cls, status == 200 and isinstance(d, dict) and cls in d
+            except Exception:
+                return cls, None
+        have = dict(await asyncio.gather(*(one(c) for c in classes)))
+        out = {"online": all(v is not None for v in have.values()), "variants": {}, "models": {}}
+        choices = {}
+        for v in wf.TD_NODES:
+            nodes = [c for c in wf.TD_NODES[v] if have.get(c) is False]
+            lost = []
+            for cls, field, name in wf.TD_MODELS[v]:
+                if (cls, field) not in choices:
+                    choices[(cls, field)] = await self.comfy_choices(cls, field) if out["online"] else []
+                base = name.split("/")[-1].lower()
+                found = next((n for n in choices[(cls, field)] if n.replace(chr(92), "/").split("/")[-1].lower() == base), None)
+                out["models"][base] = found or ""
+                if not found and choices[(cls, field)]:   # an empty list means ComfyUI did not tell the choices: then the file is not reported as missing
+                    fl = wf.TD_FILES[base]
+                    lost.append({"file": fl["file"], "folder": "models/" + self.TD_FOLDERS[cls] + "/3D", "sub": self.TD_FOLDERS[cls], "url": fl["url"], "page": fl["page"], "size": fl["size"]})
+            out["variants"][v] = {"nodes": nodes, "models": lost}
+        return out
+
+    async def h_td_info(self, _req):
+        c = await self.td_check()
+        nd = self.dlss_nodes_dir()
+        return web.json_response({"online": c["online"], "local": not self.rh(), "variants": c["variants"], "dest": str(self.td_dest()),
+                                  "autosave": self.config.get("td_autosave", True), "nodes_dir": str(nd) if nd else "", "managed": self.config.get("engine") == "managed",
+                                  "models_dir": str(self.td_models_root() or ""),
+                                  "s_tools_here": bool(nd and (nd / "s_tools").is_dir())})
+
+    async def h_td_install(self, req):
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        return await self.td_install_core(body)
+
+    async def td_install_core(self, body):
+        """Downloads the Save 3D node pack (s_tools) of one fixed, read-through version into custom_nodes. ComfyUI has to be restarted afterwards."""
+        import zipfile
+        import io
+        nd = self.dlss_nodes_dir()
+        if not nd:
+            raw = str(body.get("dir") or "").strip().strip('"')
+            base = Path(raw) if raw else None
+            nd = next((c for c in (base / "custom_nodes", base / "ComfyUI" / "custom_nodes") if c.is_dir()), None) if base else None
+            if not nd:
+                return web.json_response({"error": "Не нашла папку custom_nodes вашего ComfyUI. Укажите папку ComfyUI (где лежит custom_nodes)."}, status=400)
+            self.config.update(own_comfy_dir=str(nd.parent if nd.name == "custom_nodes" and (nd.parent / "main.py").is_file() else nd.parent.parent))
+        target = nd / "s_tools"
+        if target.exists():
+            return web.json_response({"error": "Папка s_tools уже есть: " + str(target) + ". Перезапустите ComfyUI."}, status=409)
+        try:
+            async with self.session.get(self.S_TOOLS_ZIP, timeout=aiohttp.ClientTimeout(total=120)) as r:
+                data = await r.read()
+            if r.status != 200 or len(data) > 20_000_000:
+                raise RuntimeError(f"GitHub ответил {r.status}")
+        except Exception as e:
+            return web.json_response({"error": f"Не удалось скачать ноды: {e}. Проверьте интернет и VPN."}, status=502)
+
+        def unpack():
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                names = z.namelist()
+                root = names[0].split("/")[0] + "/"
+                tmp = nd / ("s_tools_tmp_" + uuid.uuid4().hex[:6])
+                for n in names:
+                    rel = n[len(root):]
+                    if not rel or n.endswith("/"):
+                        continue
+                    dst = (tmp / rel).resolve()
+                    if tmp.resolve() not in dst.parents:
+                        raise RuntimeError("в архиве странный путь: " + n)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(z.read(n))
+                if not (tmp / "__init__.py").is_file():
+                    shutil.rmtree(tmp, ignore_errors=True)
+                    raise RuntimeError("в архиве нет __init__.py")
+                tmp.rename(target)
+        try:
+            await asyncio.to_thread(unpack)
+        except Exception as e:
+            return web.json_response({"error": f"Не удалось распаковать ноды: {e}"}, status=500)
+        return web.json_response({"ok": True, "dir": str(target)})
+
+    def td_models_root(self, raw=""):
+        if self.config.get("engine") == "managed":
+            return Path(self.config.get("install_dir") or "") / catalog.COMFY_DIRNAME / "ComfyUI" / "models"
+        d = str(raw or self.config.get("ext_models_dir") or "").strip().strip('"')
+        return Path(d) if d else None
+
+    async def h_td_prepare(self, req):
+        """One button: the Save 3D nodes (when missing) and the model files of the chosen variant are fetched into the user's ComfyUI; the built-in ComfyUI is restarted
+        at the end when nodes were added. For the user's own ComfyUI the folder `models` is asked once."""
+        body = await req.json()
+        variant = body.get("variant") if body.get("variant") in ("triposplat", "trellis") else "triposplat"
+        if self.rh():
+            raise web.HTTPBadRequest(text="3D работает только с локальным ComfyUI.")
+        if getattr(self, "td_task", None) and not self.td_task.done():
+            raise web.HTTPConflict(text="Подготовка уже идёт. Дождитесь окончания.")
+        root = self.td_models_root(body.get("dir"))
+        if not root or not root.is_dir() or not any((root / sub).is_dir() for sub in ("diffusion_models", "vae", "clip_vision", "checkpoints")):
+            raise web.HTTPBadRequest(text="Не нашла папку models вашего ComfyUI. Укажите папку, где лежат diffusion_models, vae и clip_vision.")
+        if self.config.get("engine") != "managed":
+            self.config.update(ext_models_dir=str(root))
+        c = await self.td_check()
+        if not c["online"]:
+            raise web.HTTPBadGateway(text="ComfyUI не отвечает. Запустите его и повторите.")
+        v = c["variants"][variant]
+        need_nodes = any(n in ("SSave3D", "SMeshClay") for n in v["nodes"])
+        if need_nodes and not self.dlss_nodes_dir() and not body.get("nodes_dir"):
+            raise web.HTTPBadRequest(text="Не нашла папку custom_nodes. Укажите папку ComfyUI (где лежит custom_nodes).")
+        managed = self.config.get("engine") == "managed"
+        lost = list(v["models"])
+        inst = engine.Installer(ROOT, self.session, None)
+        self.td_installer = inst
+
+        async def emit(ev):
+            await self.broadcast({"type": "td_dl", "state": ev.get("state"), "label": ev.get("label"), "done": ev.get("overall_done"), "total": ev.get("overall_total"),
+                                  "index": ev.get("index"), "count": ev.get("count")})
+
+        async def run():
+            try:
+                restart = False
+                if need_nodes:
+                    await emit({"state": "running", "label": "Ставлю ноды сохранения 3D (s_tools)…"})
+                    resp = await self.td_install_core({"dir": body.get("nodes_dir") or ""})
+                    if resp.status >= 400 and resp.status != 409:
+                        raise RuntimeError(json.loads(resp.text).get("error", "не удалось поставить ноды"))
+                    restart = True
+                total = sum(m["size"] for m in lost)
+                base = 0
+                for i, m in enumerate(lost):
+                    dest = root / m["sub"] / "3D" / m["file"]
+
+                    async def emit_overall(ev, base=base, idx=i, label=m["file"]):
+                        if ev.get("done") is not None:
+                            await emit({"state": "running", "overall_done": base + ev["done"], "overall_total": total, "index": idx + 1, "count": len(lost), "label": label})
+                    inst.emit = emit_overall
+                    await inst.download(m["url"], dest, "td", m["file"], m["size"])
+                    base += m["size"]
+                if restart and managed:
+                    await emit({"state": "running", "label": "Перезапускаю ComfyUI, чтобы он увидел новые ноды…"})
+                    if self.process:
+                        await asyncio.to_thread(self.process.stop)
+                    self.start_managed()
+                    await self.watch_start()
+                    await emit({"state": "done", "label": "Готово: всё скачано и установлено. Можно создавать модель."})
+                elif restart:
+                    await emit({"state": "done", "label": "Файлы скачаны, ноды установлены. Перезапустите ваш ComfyUI и нажмите «Проверить снова»."})
+                else:
+                    await emit({"state": "done", "label": "Готово: файлы скачаны. Нажмите «Проверить снова»."})
+            except engine.Cancelled:
+                await emit({"state": "error", "label": "Скачивание остановлено. Скачанное сохранено: нажмите кнопку снова, и оно продолжится."})
+            except Exception as ex:
+                await emit({"state": "error", "label": str(ex)[:300]})
+        self.td_task = asyncio.create_task(run())
+        return web.json_response({"ok": True, "count": len(lost), "size": sum(m["size"] for m in lost), "nodes": need_nodes})
+
+    async def h_td_prepare_cancel(self, _req):
+        inst = getattr(self, "td_installer", None)
+        if inst:
+            inst.cancelled = True
+        return web.json_response({"ok": True})
+
+    async def h_td_run(self, req):
+        form, content, fname = {}, None, ""
+        async for part in await req.multipart():
+            if part.name == "file":
+                fname = part.filename or ""
+                content = bytes(await part.read())
+            else:
+                form[part.name] = (await part.text()).strip()
+        if self.rh():
+            raise web.HTTPBadRequest(text="3D работает только с локальным ComfyUI (не с облаком RunningHub).")
+        variant = form.get("variant") if form.get("variant") in ("triposplat", "trellis") else "triposplat"
+        if not content:
+            raise web.HTTPBadRequest(text="Добавьте картинку персонажа.")
+        c = await self.td_check()
+        if not c["online"]:
+            raise web.HTTPBadGateway(text="ComfyUI не отвечает. Проверьте, что он запущен.")
+        v = c["variants"][variant]
+        if v["nodes"]:
+            if any(n in ("SSave3D", "SMeshClay") for n in v["nodes"]):
+                raise web.HTTPBadRequest(text="Нет нод сохранения 3D (s_tools). Нажмите «Установить ноды» на странице и перезапустите ComfyUI.")
+            raise web.HTTPBadRequest(text="В вашем ComfyUI нет нод: " + ", ".join(v["nodes"]) + ". Обновите ComfyUI до версии 0.45 или новее (Настройки, блок «Движок»).")
+        if v["models"]:
+            raise web.HTTPBadRequest(text="Не найдены файлы моделей: " + "; ".join(f"{m['file']} (папка {m['folder']})" for m in v["models"]))
+        try:
+            faces = int(min(1000000, max(5000, float(form.get("faces") or 200000))))
+            seed = int(form.get("seed") or 0) or random.randrange(2 ** 40)
+        except ValueError:
+            raise web.HTTPBadRequest(text="Неверное число")
+        fmt = form.get("format") if form.get("format") in ("glb", "fbx", "obj") else "glb"
+        autosave = form.get("autosave") != "0"
+        self.config.update(td_autosave=autosave)
+        folder = form.get("folder", "").strip().strip('"')
+        if autosave:
+            if folder:
+                self.config.update(td_dir=folder)
+            dest = self.td_dest()
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                raise web.HTTPBadRequest(text=f"Не могу создать папку {dest}: {e}")
+        else:
+            dest = self.td_staging()
+        for old in self.td_staging().iterdir():   # leftovers of earlier runs (viewer files, models that were never saved)
+            try:
+                if old.is_file() and old.stat().st_mtime < datetime.now().timestamp() - 86400:
+                    old.unlink()
+            except OSError:
+                pass
+        name = re.sub(r"[^\w\-]+", "_", form.get("name") or Path(fname).stem or "model", flags=re.UNICODE).strip("_")[:40] or "model"
+        ext = Path(fname).suffix.lstrip(".").lower()[:5] or "png"
+        run = uuid.uuid4().hex[:8]
+        fd = aiohttp.FormData()
+        fd.add_field("image", content, filename=f"h3s_3d_{run}.{ext}", content_type="application/octet-stream")
+        fd.add_field("type", "input")
+        status, res = await self.comfy_json("POST", "/upload/image", data=fd)
+        if status != 200:
+            raise web.HTTPBadGateway(text="Не удалось передать картинку в ComfyUI")
+        try:
+            base = json.loads((ROOT / "graphs3d" / f"{variant}.json").read_text(encoding="utf-8"))
+        except Exception:
+            raise web.HTTPBadGateway(text=f"В программе нет файла графа {variant}.json")
+        graph, stages = wf.td_api_graph(base, {"variant": variant, "image": res["name"], "seed": seed, "faces": faces, "format": fmt, "folder": str(dest),
+                                               "name": name + ("" if autosave else "_" + run), "nobg": form.get("nobg") != "0", "models": c["models"],
+                                               "preview_dir": str(self.td_staging())})
+        td = {"run": run, "autosave": autosave, "dest": str(dest), "format": fmt, "variant": variant, "seed": seed}
+        sub = {"triposplat": "3D · Точно (TripoSplat)", "trellis": "3D · Чисто (Trellis)"}[variant]
+        return await self.queue(graph, stages, {"mode": "td", "sub": sub, "prompt": name, "aspect": "", "q": "", "len": 0.0, "res": "", "seed": seed, "td": td})
+
+    async def finish_td(self, job, outputs):
+        pid = job["prompt_id"]
+        td = job["meta"]["td"]
+        paths = [p for out in outputs.values() for p in (out.get("text") or []) if isinstance(p, str) and p.lower().endswith((".glb", ".fbx", ".obj"))]
+        files, preview = [], ""
+        for p in paths:
+            f = Path(p)
+            if not f.is_file():
+                continue
+            if "_pv_" in f.name and f.parent == self.td_staging():
+                preview = f.name
+            else:
+                files.append({"name": f.name, "path": str(f), "size": f.stat().st_size})
+        if not files:
+            self.note_error("3D: ComfyUI закончил работу, но файл модели не появился")
+            await self.broadcast({"type": "error", "prompt_id": pid, "message": "3D: ComfyUI закончил работу, но файл модели не появился. Проверьте, что ноды s_tools на месте, и повторите."})
+            return
+        await self.broadcast({"type": "done", "prompt_id": pid, "items": [], "td": {**td, "files": files, "preview": preview}})
+
+    async def h_td_file(self, req):
+        """A model made with autosave off: the browser saves it where the user chooses."""
+        name = Path(req.query.get("name", "")).name
+        p = self.td_staging() / name
+        if not name or not p.is_file():
+            raise web.HTTPNotFound(text="Файл не найден: модель удалена или программа перезапускалась")
+        if req.query.get("inline"):
+            return web.FileResponse(p, headers={"Cache-Control": "no-store"})
+        return web.FileResponse(p, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    async def h_vendor(self, req):
+        name = req.match_info["name"]
+        if name not in ("three-viewer.js",):
+            raise web.HTTPNotFound()
+        return web.FileResponse(UI_DIR / "vendor" / name, headers={"Content-Type": "text/javascript"})
+
+    async def h_td_save_to(self, req):
+        """Moves a model made with autosave off to a folder the user typed (when the browser cannot ask where to save)."""
+        body = await req.json()
+        name = Path(str(body.get("name") or "")).name
+        src = self.td_staging() / name
+        if not name or not src.is_file():
+            raise web.HTTPNotFound(text="Файл не найден")
+        dest = Path(str(body.get("folder") or "").strip().strip('"')) if body.get("folder") else self.td_dest()
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            clean = re.sub(r"_[0-9a-f]{8}(_\d+\.\w+)$", lambda m: m.group(1), name)
+            target, n = dest / clean, 1
+            while target.exists():
+                n += 1
+                target = dest / f"{Path(clean).stem}_{n}{Path(clean).suffix}"
+            shutil.copyfile(src, target)
+        except OSError as e:
+            raise web.HTTPBadRequest(text=f"Не удалось сохранить: {e}")
+        return web.json_response({"ok": True, "path": str(target), "folder": str(dest)})
+
+    async def h_td_open(self, req):
+        body = await req.json()
+        p = Path(str(body.get("path") or ""))
+        bases = [self.td_dest().resolve(), self.td_staging().resolve(), self.results_dir().resolve()] + ([Path(self.output_dir).resolve()] if getattr(self, "output_dir", None) else [])
+        try:
+            r = p.resolve()
+            ok = any(r == b or b in r.parents for b in bases)
+        except OSError:
+            ok = False
+        if not ok or not p.exists():
+            raise web.HTTPBadRequest(text="Папка не найдена")
+        os.startfile(str(p if p.is_dir() else p.parent))
+        return web.json_response({"ok": True})
+
+    # ---------- animated icons: a video -> transparent frames (PNG), sprite sheet, animated WEBP, Telegram WebM ----------
+
+    ICONS_DIR = "Анимированные иконки"
+    ICON_NODE_FILES = ("loop_cleanup.py", "telegram_sticker_webm.py")   # the program's own two nodes: they are copied into custom_nodes
+
+    async def icons_nodes(self):
+        """True / False for each node the page needs; None when ComfyUI does not answer."""
+        out = {}
+        for cls in ("RMBG", "MatAnyone2", "LoopCleanup", "TelegramStickerWebM", "ImageBlur", "GrowMask", "JoinImageWithAlpha", "LoadVideo"):
+            try:
+                status, d = await self.comfy_json("GET", f"/object_info/{cls}", timeout=aiohttp.ClientTimeout(total=15))
+                out[cls] = status == 200 and isinstance(d, dict) and cls in d
+            except Exception:
+                out[cls] = None
+        return out
+
+    async def h_icons_info(self, _req):
+        nodes = await self.icons_nodes()
+        return web.json_response({"nodes": nodes, "comfy": all(v is not None for v in nodes.values()), "local": not self.rh(),
+                                  "dir": self.config.get("results_dir") or str(self.default_results_dir())})
+
+    async def h_icons_install(self, req):
+        """Copies the program's own nodes (LoopCleanup and TelegramStickerWebM) into custom_nodes of the ComfyUI in use.
+        ComfyUI has to be restarted afterwards: it reads custom_nodes only at start."""
+        try:
+            body = await req.json()
+        except Exception:
+            body = {}
+        nodes_dir = self.dlss_nodes_dir()
+        if not nodes_dir and not body.get("dir"):
+            auto_py = await self.running_comfy_python()
+            cand = auto_py.parent.parent / "ComfyUI" / "custom_nodes" if auto_py else None
+            if cand and cand.is_dir():
+                nodes_dir = cand
+                self.config.update(own_comfy_dir=str(auto_py.parent.parent))
+        if not nodes_dir:
+            raw = str(body.get("dir") or self.config.get("own_comfy_dir") or "").strip().strip('"')
+            base = Path(raw) if raw else None
+            nodes_dir = next((c for c in (base / "custom_nodes", base / "ComfyUI" / "custom_nodes") if c.is_dir()), None) if base else None
+            if not nodes_dir:
+                return web.json_response({"error": "Не нашла папку custom_nodes вашего ComfyUI. Укажите папку ComfyUI (где лежит custom_nodes)."}, status=400)
+            self.config.update(own_comfy_dir=raw)
+        copied = []
+        for fn in self.ICON_NODE_FILES:
+            src = ROOT / "icon_nodes" / fn
+            if not src.is_file():
+                return web.json_response({"error": f"В программе нет файла {fn}."}, status=500)
+            shutil.copyfile(src, nodes_dir / fn)
+            copied.append(fn)
+        return web.json_response({"ok": True, "dir": str(nodes_dir), "files": copied})
+
+    async def h_icons_open(self, req):
+        body = await req.json()
+        p = Path(str(body.get("path") or ""))
+        bases = [(self.results_dir() / self.ICONS_DIR).resolve()] + ([Path(self.output_dir).resolve()] if getattr(self, "output_dir", None) else [])
+        try:
+            ok = any(p.resolve() == b or b in p.resolve().parents for b in bases)
+        except OSError:
+            ok = False
+        if not ok or not p.exists():
+            raise web.HTTPBadRequest(text="Папка не найдена")
+        os.startfile(str(p))
+        return web.json_response({"ok": True})
+
+    async def h_icons_cut(self, req):
+        """The cut-out of ONE video (a Library clip or a file): method, edge, size and what to save come from the page."""
+        form, content, fname = {}, None, ""
+        async for part in await req.multipart():
+            if part.name == "file":
+                fname = part.filename or ""
+                content = bytes(await part.read())
+            else:
+                form[part.name] = (await part.text()).strip()
+        if self.rh():
+            raise web.HTTPBadRequest(text="Анимированные иконки работают только с локальным ComfyUI.")
+        item = None
+        if content is None:
+            item = self.library.get(form.get("id", ""))
+            if not item or item.get("kind") == "image":
+                raise web.HTTPBadRequest(text="Видео не найдено")
+            content = await self.item_bytes(item)
+            ext = item.get("ext") or "mp4"
+        else:
+            ext = Path(fname).suffix.lstrip(".").lower()[:5] or "mp4"
+
+        def num(key, default, lo, hi):
+            try:
+                return int(min(hi, max(lo, float(form.get(key) or default))))
+            except ValueError:
+                return default
+        method = form.get("method") if form.get("method") in ("green", "rmbg", "matanyone") else "matanyone"
+        want = {k: form.get(k) == "1" for k in ("png", "sprite", "webp", "telegram")}
+        if not any(want.values()):
+            raise web.HTTPBadRequest(text="Отметьте, что сохранить: кадры PNG, спрайт-лист, WEBP или стикер Telegram")
+        nodes = await self.icons_nodes()
+        if any(v is None for v in nodes.values()):
+            raise web.HTTPBadGateway(text="ComfyUI не отвечает. Проверьте, что он запущен.")
+        pack = {"RMBG": "ComfyUI-RMBG (удаление фона)", "MatAnyone2": "ComfyUI-MatAnyone (автор FuouM) и файл matanyone2.pth",
+                "LoopCleanup": "нода программы: нажмите «Установить ноды» на странице", "TelegramStickerWebM": "нода программы: нажмите «Установить ноды» на странице",
+                "ImageBlur": "ComfyUI (обновите его)", "GrowMask": "ComfyUI (обновите его)", "JoinImageWithAlpha": "ComfyUI (обновите его)"}
+        need = ["JoinImageWithAlpha", "LoopCleanup"] + {"green": ["GrowMask", "ImageBlur"], "rmbg": ["RMBG"], "matanyone": ["RMBG", "MatAnyone2", "GrowMask"]}[method]
+        if want["telegram"]:
+            need.append("TelegramStickerWebM")
+        miss = [c for c in need if not nodes.get(c)]
+        if miss:
+            raise web.HTTPBadRequest(text="В вашем ComfyUI нет нужных нод: " + "; ".join(f"{c} ({pack.get(c, '')})" for c in miss))
+        # the size of the frames: the long side in pixels, the proportions of the video are kept
+        w = h = 0
+        side = num("size", 0, 0, 2048)
+        ff = self.ffmpeg()
+        if side and ff:
+            import tempfile
+            lp = self.file_path(item) if item else None
+            tmp = None
+            try:
+                if not (lp and lp.exists()):
+                    tmp = Path(tempfile.gettempdir()) / f"h3s_probe_{uuid.uuid4().hex[:8]}.{ext}"
+                    tmp.write_bytes(content)
+                    lp = tmp
+                pr = await asyncio.to_thread(vmix.probe, ff, str(lp))
+            finally:
+                if tmp:
+                    tmp.unlink(missing_ok=True)
+            if pr:
+                k = side / max(pr[0], pr[1])
+                w, h = max(16, round(pr[0] * k / 2) * 2), max(16, round(pr[1] * k / 2) * 2)
+        name = re.sub(r"[^\w\-]+", "_", form.get("name") or (item or {}).get("prompt", "")[:30] or "icon", flags=re.UNICODE).strip("_")[:40] or "icon"
+        run = uuid.uuid4().hex[:8]
+        folder = f"{name}_{run}"
+        fname_in = f"h3s_i_{run}.{ext}"
+        fd = aiohttp.FormData()
+        fd.add_field("image", content, filename=fname_in, content_type="video/mp4")
+        fd.add_field("type", "input")
+        status, res = await self.comfy_json("POST", "/upload/image", data=fd)
+        if status != 200:
+            raise web.HTTPBadGateway(text="Не удалось передать видео в ComfyUI")
+        opts = {"method": method, "edge": num("edge", -2, -8, 4), "threshold": num("threshold", 2, 1, 20) / 100, "loop": form.get("loop") == "1",
+                "despill": form.get("despill", "1") == "1", "key": form.get("key", "green"), "width": w, "height": h, "prefix": folder,
+                "png": want["png"] or want["sprite"], "webp": want["webp"], "telegram": want["telegram"],
+                "r_erode": num("r_erode", 0, 0, 20), "r_dilate": num("r_dilate", 0, 0, 20)}
+        graph, stages = wf.icons_graph(res["name"], opts)
+        icons = {"run": run, "name": name, "folder": folder, "step": num("step", 1, 1, 12), "cols": num("cols", 0, 0, 40), "fps": 24.0, "w": w, "h": h, **want}
+        sub = {"green": "по зелёному", "rmbg": "RMBG", "matanyone": "MatAnyone"}[method]
+        return await self.queue(graph, stages, {"mode": "icons", "sub": "Анимированные иконки · " + sub, "prompt": name, "aspect": "", "q": "",
+                                                "len": float((item or {}).get("len") or 0), "res": f"{w}×{h}" if w else (item or {}).get("res", ""),
+                                                "seed": 0, "icons": icons})
+
+    async def h_icons_run(self, req):
+        """Animated icons: runs the user's own finished graph (see workflows.icons_api_graph). One job: picture -> video -> cut-out -> files."""
+        form, content, fname, vcontent, vname = {}, None, "", None, ""
+        async for part in await req.multipart():
+            if part.name == "file":
+                fname = part.filename or ""
+                content = bytes(await part.read())
+            else:
+                form[part.name] = (await part.text()).strip()
+        if self.rh():
+            raise web.HTTPBadRequest(text="Анимированные иконки работают только с локальным ComfyUI.")
+        mode = "video" if form.get("src") == "video" else "image"
+        item = None
+        if mode == "video":
+            if content is None:
+                item = self.library.get(form.get("id", ""))
+                if not item or item.get("kind") == "image":
+                    raise web.HTTPBadRequest(text="Видео не найдено")
+                content = await self.item_bytes(item)
+                ext = item.get("ext") or "mp4"
+            else:
+                ext = Path(fname).suffix.lstrip(".").lower()[:5] or "mp4"
+        else:
+            if not content:
+                raise web.HTTPBadRequest(text="Картинка не передана")
+            ext = Path(fname).suffix.lstrip(".").lower()[:5] or "png"
+
+        def num(key, default, lo, hi):
+            try:
+                return int(min(hi, max(lo, float(form.get(key) or default))))
+            except ValueError:
+                return default
+        method = form.get("method") if form.get("method") in ("green", "rmbg", "matanyone") else "matanyone"
+        want = {k: form.get(k) == "1" for k in ("png", "sprite", "webp", "telegram")}
+        if not any(want.values()):
+            raise web.HTTPBadRequest(text="Отметьте, что сохранить: кадры PNG, спрайт-лист, WEBP или стикер Telegram")
+        prompt = form.get("prompt", "").strip()
+        if mode == "image" and not prompt:
+            raise web.HTTPBadRequest(text="Напишите, что должен делать персонаж")
+        try:
+            base = json.loads((ROOT / "icon_nodes" / "icons_workflow_api.json").read_text(encoding="utf-8"))
+        except Exception:
+            raise web.HTTPBadGateway(text="В программе нет файла с графом иконок (icons_workflow_api.json)")
+        # sizes: the picture (or the video) decides the proportions
+        dims = (0, 0)
+        ff = self.ffmpeg()
+        import tempfile
+        tmp = Path(tempfile.gettempdir()) / f"h3s_probe_{uuid.uuid4().hex[:8]}.{ext}"
+        try:
+            tmp.write_bytes(content)
+            pr = await asyncio.to_thread(vmix.probe, ff, str(tmp)) if ff else None
+            if pr:
+                dims = (int(pr[0]), int(pr[1]))
+        except Exception:
+            pass
+        finally:
+            tmp.unlink(missing_ok=True)
+
+        def scaled(side):
+            if not side or not dims[0]:
+                return None
+            k = side / max(dims)
+            return (max(16, round(dims[0] * k / 2) * 2), max(16, round(dims[1] * k / 2) * 2))
+        vs = None
+        if mode == "image" and form.get("vsize") and form["vsize"] != "pic":
+            lim = num("vsize", 768, 128, 2048)
+            if dims[0]:
+                k = min(1.0, lim / max(dims))
+                vs = (max(64, round(dims[0] * k)), max(64, round(dims[1] * k)))
+        elif mode == "image" and dims[0]:
+            k = min(1.0, 768 / max(dims))
+            vs = (max(64, round(dims[0] * k)), max(64, round(dims[1] * k)))   # «as the picture», but not bigger than 768: H3 is slow above that
+        side = num("size", 0, 0, 2048)
+        sz = scaled(side)
+        name = re.sub(r"[^\w\-]+", "_", form.get("name") or Path(fname).stem or (item or {}).get("prompt", "")[:30] or "icon", flags=re.UNICODE).strip("_")[:40] or "icon"
+        run = uuid.uuid4().hex[:8]
+        folder = f"{name}_{run}"
+        o = {"mode": mode, "prompt": prompt, "seconds": min(10.0, max(3.0, float(form.get("duration") or 3))), "seed": random.randrange(2 ** 50),
+             "vsize": vs, "bg": form.get("bg", "") if form.get("bg") in ("green", "pink", "blue", "white", "gray", "black") else "", "cutbg": form.get("cutbg") == "1",
+             "method": method, "edge": num("edge", -2, -8, 4), "threshold": num("threshold", 2, 1, 20) / 100, "r_erode": num("r_erode", 0, 0, 20),
+             "r_dilate": num("r_dilate", 0, 0, 20), "despill": form.get("despill", "1") == "1", "loop": form.get("loop", "1") == "1", "key": form.get("key", "green"),
+             "size": sz, "folder": folder, "png": want["png"] or want["sprite"], "webp": want["webp"], "telegram": want["telegram"]}
+        fd = aiohttp.FormData()
+        fd.add_field("image", content, filename=f"h3s_i_{run}.{ext}", content_type="application/octet-stream")
+        fd.add_field("type", "input")
+        status, res = await self.comfy_json("POST", "/upload/image", data=fd)
+        if status != 200:
+            raise web.HTTPBadGateway(text="Не удалось передать файл в ComfyUI")
+        o["image" if mode == "image" else "video"] = res["name"]
+        graph, stages, need = wf.icons_api_graph(base, o)
+        # every node and every model file of the graph must exist in ComfyUI: say which one is missing instead of a long ComfyUI error
+        classes = sorted({graph[i]["class_type"] for i in need})
+        missing = []
+        for cls in classes:
+            try:
+                st, data = await self.comfy_json("GET", f"/object_info/{cls}", timeout=aiohttp.ClientTimeout(total=15))
+            except Exception:
+                raise web.HTTPBadGateway(text="ComfyUI не отвечает. Проверьте, что он запущен.")
+            if st != 200 or not data or cls not in data:
+                missing.append(cls)
+        if missing:
+            hints = {"RMBG": "ComfyUI-RMBG", "MatAnyone2": "ComfyUI-MatAnyone (FuouM)", "LoopCleanup": "кнопка «Установить ноды» на странице",
+                     "TelegramStickerWebM": "кнопка «Установить ноды» на странице", "GLSLShader": "обновите ComfyUI", "ComfySwitchNode": "обновите ComfyUI"}
+            raise web.HTTPBadRequest(text="В вашем ComfyUI нет нод: " + "; ".join(f"{c}" + (f" ({hints[c]})" if c in hints else "") for c in missing))
+        if mode == "image":
+            for cls, field, key in (("UNETLoader", "unet_name", "105:6"), ("LoraLoaderModelOnly", "lora_name", "105:121"), ("CLIPLoader", "clip_name", "105:13"),
+                                    ("VAELoader", "vae_name", "105:11")):
+                have = await self.comfy_choices(cls, field)
+                if have and graph[key]["inputs"][field] not in have:
+                    tail = graph[key]["inputs"][field].replace("\\", "/").split("/")[-1].lower()
+                    alt = next((n for n in have if n.replace("\\", "/").split("/")[-1].lower() == tail), None)
+                    if not alt:
+                        raise web.HTTPBadRequest(text="В ComfyUI не найден файл модели: " + graph[key]["inputs"][field] + ". Он нужен для видео из картинки.")
+                    graph[key]["inputs"][field] = alt
+            alt = next((n for n in await self.comfy_choices("VAELoader", "vae_name") if n.replace("\\", "/").split("/")[-1].lower() == "minimax_h3_audio_vae_fp32.safetensors"), None)
+            if alt:
+                graph["105:24"]["inputs"]["vae_name"] = alt
+        icons = {"run": run, "name": name, "folder": folder, "step": num("step", 1, 1, 12), "cols": num("cols", 0, 0, 40), "fps": 24.0,
+                 "w": sz[0] if sz else 0, "h": sz[1] if sz else 0, "src": mode, **want}
+        sub = {"green": "по зелёному", "rmbg": "RMBG", "matanyone": "MatAnyone"}[method]
+        return await self.queue(graph, stages, {"mode": "icons", "sub": "Анимированные иконки · " + sub, "prompt": name, "aspect": "", "q": "",
+                                                "len": float(o["seconds"]) if mode == "image" else float((item or {}).get("len") or 0),
+                                                "res": f"{vs[0]}×{vs[1]}" if vs else "", "seed": o["seed"], "icons": icons})
+
+    async def comfy_choices(self, cls, field):
+        """The file names ComfyUI offers in a loader node (the list of its models)."""
+        try:
+            status, data = await self.comfy_json("GET", f"/object_info/{cls}", timeout=aiohttp.ClientTimeout(total=15))
+            entry = data[cls]["input"]["required"][field]
+            spec = entry[0]
+            if spec == "COMBO" and len(entry) > 1 and isinstance(entry[1], dict):   # the newer ComfyUI writes a list of choices this way
+                spec = entry[1].get("options")
+            return list(spec) if isinstance(spec, list) else []
+        except Exception:
+            return []
+
+    async def h_icons_video(self, req):
+        """Picture -> video exactly as in the user's Telegram workflow: fl2va + Turbo 4-step v1.2 (0.8), 6 steps, the picture is the first AND the last frame."""
+        await self.need_models("video")
+        form, files, prompt, aspect, quality, seed = await self.read_form(req, ("first",))
+        if not files.get("first"):
+            raise web.HTTPBadRequest(text="Нет картинки")
+        if self.rh():
+            raise web.HTTPBadRequest(text="Анимированные иконки работают только с локальным ComfyUI.")
+
+        def pick(names, tail):
+            return next((n for n in names if n.replace("\\", "/").split("/")[-1].lower() == tail.lower()), None)
+        unet = pick(await self.comfy_choices("UNETLoader", "unet_name"), wf.ICON_UNET)
+        lora = pick(await self.comfy_choices("LoraLoaderModelOnly", "lora_name"), wf.ICON_LORA)
+        if not unet or not lora:
+            miss = [n for n, v in ((wf.ICON_UNET, unet), (wf.ICON_LORA, lora)) if not v]
+            raise web.HTTPBadRequest(text="В ComfyUI не найден файл модели: " + ", ".join(miss) + ". Он нужен для видео из картинки на этой странице. "
+                                          "Положите его в папку models (diffusion_models или loras, подпапка MinimaxH3) и перезапустите ComfyUI.")
+        seconds = min(wf.MAX_SECONDS if hasattr(wf, "MAX_SECONDS") else 10, max(3.0, float(form.get("duration", 3))))
+        width, height = wf.resolution(aspect, quality, form)
+        graph, stages = wf.icons_video_graph(self.model_names, unet, lora, prompt, width, height, seconds, seed, files["first"])
+        return await self.queue(graph, stages, {"mode": "video", "sub": "Анимированная иконка · картинка = первый и последний кадр", "prompt": prompt,
+                                                "aspect": aspect, "q": quality, "len": seconds, "res": f"{width}×{height}", "seed": seed})
+
+    async def picture_has_alpha(self, content, ext):
+        """True when the picture really has transparent pixels (a cut-out sticker), not only an unused alpha channel."""
+        ff = self.ffmpeg()
+        if not ff or ext not in ("png", "webp"):
+            return False
+        import tempfile
+        tmp = Path(tempfile.gettempdir()) / f"h3s_alpha_{uuid.uuid4().hex[:8]}.{ext}"
+        try:
+            tmp.write_bytes(content)
+            proc = await asyncio.create_subprocess_exec(ff, "-v", "info", "-i", str(tmp), "-vf", "format=rgba,alphaextract,signalstats", "-f", "null", "-",
+                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            out, _ = await proc.communicate()
+            m = re.search(rb"YMIN:\s*([0-9.]+)", out)   # the darkest pixel of the alpha channel
+            return bool(m) and float(m.group(1)) < 250
+        except Exception:
+            return False
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    async def h_icons_prep(self, req):
+        """Step 0 of the icons from a picture (the group «ХРОМАКЕЙ ФОН до H3» of the user's workflow): the hero goes onto a flat green background,
+        so H3 animates exactly this picture and the cut-out by green is clean afterwards. The mask is the file's transparency or RMBG."""
+        content, fname = None, ""
+        async for part in await req.multipart():
+            if part.name == "file":
+                fname = part.filename or ""
+                content = bytes(await part.read())
+        if not content:
+            raise web.HTTPBadRequest(text="Картинка не передана")
+        if self.rh():
+            raise web.HTTPBadRequest(text="Анимированные иконки работают только с локальным ComfyUI.")
+        ext = Path(fname).suffix.lstrip(".").lower()[:5] or "png"
+        alpha = await self.picture_has_alpha(content, ext)
+        nodes = await self.icons_nodes()
+        if any(v is None for v in nodes.values()):
+            raise web.HTTPBadGateway(text="ComfyUI не отвечает. Проверьте, что он запущен.")
+        if not alpha and not nodes.get("RMBG"):
+            raise web.HTTPBadRequest(text="Фон картинки не прозрачный, а в ComfyUI нет ноды ComfyUI-RMBG (удаление фона). Установите её через ComfyUI Manager "
+                                          "или загрузите картинку с прозрачным фоном (PNG).")
+        run = uuid.uuid4().hex[:8]
+        fd = aiohttp.FormData()
+        fd.add_field("image", content, filename=f"h3s_p_{run}.{ext}", content_type="image/png")
+        fd.add_field("type", "input")
+        status, res = await self.comfy_json("POST", "/upload/image", data=fd)
+        if status != 200:
+            raise web.HTTPBadGateway(text="Не удалось передать картинку в ComfyUI")
+        g = {"I": {"class_type": "LoadImage", "inputs": {"image": res["name"]}}}
+        if alpha:   # LoadImage gives 1 - alpha as the mask
+            g["M"] = {"class_type": "InvertMask", "inputs": {"mask": ["I", 1]}}
+            mask = ["M", 0]
+        else:
+            g["M"] = {"class_type": "RMBG", "inputs": {"image": ["I", 0], "model": "RMBG-2.0", "sensitivity": 1.0, "process_res": 1024, "mask_blur": 0,
+                                                       "mask_offset": 0, "invert_output": False, "refine_foreground": False, "background": "Alpha",
+                                                       "background_color": "#222222"}}
+            mask = ["M", 1]
+        g["Z"] = {"class_type": "GetImageSize", "inputs": {"image": ["I", 0]}}
+        g["E"] = {"class_type": "EmptyImage", "inputs": {"width": ["Z", 0], "height": ["Z", 1], "batch_size": 1, "color": 65280}}
+        g["C"] = {"class_type": "ImageCompositeMasked", "inputs": {"destination": ["E", 0], "source": ["I", 0], "x": 0, "y": 0, "resize_source": False,
+                                                                    "mask": mask}}
+        g["S"] = {"class_type": "SaveImage", "inputs": {"images": ["C", 0], "filename_prefix": f"H3Workspace/icons/{run}/green_bg"}}
+        stages = {"I": "load", "M": "encode", "C": "decode", "S": "save"}
+        return await self.queue(g, stages, {"mode": "icons", "sub": "Картинка на зелёном фоне (для анимации)" + (" · по прозрачности" if alpha else " · RMBG"),
+                                            "prompt": Path(fname).stem[:40], "aspect": "", "q": "", "len": 0, "res": "", "seed": 0})
+
+    @staticmethod
+    def png_size(path):
+        with open(path, "rb") as f:
+            head = f.read(24)
+        return struct.unpack(">II", head[16:24]) if head[:8] == b"\x89PNG\r\n\x1a\n" else (0, 0)
+
+    async def finish_icons(self, job, ic, files):
+        pid = job["prompt_id"]
+        notes = []
+        try:
+            out_root = getattr(self, "output_dir", None)
+            if out_root:   # the one place of the files: the output folder of ComfyUI (no second copy anywhere else)
+                dest = Path(out_root) / ic["folder"]
+            else:
+                dest = self.results_dir() / self.ICONS_DIR / f"{ic['name']}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}_{ic['run']}"
+            frames_dir = dest / "кадры"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+
+            async def fetch(f, target):
+                async with self.session.get(self.comfy + "/view", params={"filename": f["filename"], "subfolder": f.get("subfolder", ""),
+                                                                         "type": f.get("type", "output")}) as r:
+                    body = await r.read()
+                if r.status != 200 or not body:
+                    raise RuntimeError(f"ComfyUI не отдал файл {f['filename']}")
+                target.write_bytes(body)
+            mine = [f for f in files if str(f.get("subfolder", "")).replace("\\", "/").startswith(ic["folder"])]
+            frames = sorted((f for f in mine if f["filename"].startswith("frame_") and f["filename"].lower().endswith(".png")), key=lambda f: f["filename"])
+            webp = next((f for f in mine if f["filename"].startswith("animation_") and f["filename"].lower().endswith(".webp")), None)
+            name, made = ic["name"], []
+            for i, f in enumerate(frames, 1):
+                await fetch(f, frames_dir / f"{name}_{i:04d}.png")
+            if ic.get("sprite") and frames:
+                ff = self.ffmpeg()
+                step = max(1, int(ic.get("step") or 1))
+                sel = len(range(0, len(frames), step))
+                cols = int(ic.get("cols") or 0) or math.ceil(math.sqrt(sel))
+                cols = max(1, min(cols, sel))
+                rows = math.ceil(sel / cols)
+                sheet = dest / f"{name}_спрайт-лист.png"
+                if not ff:
+                    notes.append("Спрайт-лист не собран: в программе нет ffmpeg.")
+                else:
+                    sw, sh = int(ic.get("w") or 0), int(ic.get("h") or 0)   # the sprite's frame size = the size chosen on the page (the PNG frames keep the video's size)
+                    vf = f"select='not(mod(n\\,{step}))'," + (f"scale={sw}:{sh}:flags=lanczos," if sw and sh else "") + f"tile={cols}x{rows}:margin=0:padding=0:color=0x00000000,format=rgba"
+                    proc = await asyncio.create_subprocess_exec(ff, "-hide_banner", "-v", "error", "-y", "-framerate", "24", "-i", str(frames_dir / f"{name}_%04d.png"),
+                                                                "-vf", vf, "-frames:v", "1", "-fps_mode", "passthrough", str(sheet),
+                                                                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, creationflags=engine.CREATE_NO_WINDOW)
+                    _, err = await proc.communicate()
+                    if proc.returncode != 0 or not sheet.exists():
+                        notes.append("Спрайт-лист не собран: " + err.decode("utf-8", "ignore")[-200:].strip())
+                    else:
+                        fw, fh = (sw, sh) if sw and sh else self.png_size(frames_dir / f"{name}_0001.png")
+                        info = {"frames": sel, "columns": cols, "rows": rows, "frame_width": fw, "frame_height": fh,
+                                "fps": round(float(ic.get("fps") or 24) / step, 2), "sheet_width": fw * cols, "sheet_height": fh * rows}
+                        (dest / f"{name}_спрайт-лист.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+                        made.append((sheet, "image", f"Спрайт-лист {cols}×{rows}, кадр {fw}×{fh}"))
+            if ic.get("webp") and webp:
+                p = dest / f"{name}.webp"
+                await fetch(webp, p)
+                made.append((p, "image", "Анимированный WEBP"))
+            if ic.get("telegram"):
+                out = getattr(self, "output_dir", None)
+                got = sorted((out / ic["folder"]).rglob("sticker_*.webm"), key=lambda q: q.stat().st_mtime) if out and (out / ic["folder"]).is_dir() else []
+                if got:
+                    p = dest / f"{name}_telegram.webm"
+                    shutil.copyfile(got[-1], p)
+                    made.append((p, "video", "Стикер Telegram WebM"))
+                else:
+                    notes.append("Стикер Telegram: файл не найден в папке результатов ComfyUI.")
+            vid = next((f for f in mine if f["filename"].lower().endswith((".mp4", ".webm")) and not f["filename"].startswith("sticker_")), None) if ic.get("src") == "image" else None
+            if vid:   # the video H3 made from the picture: it goes to the Library too
+                p = dest / f"{name}_видео{Path(vid['filename']).suffix}"
+                await fetch(vid, p)
+                made.append((p, "video", "Видео из картинки (исходник)"))
+            if ic.get("png") and frames:
+                made.append((frames_dir / f"{name}_0001.png", "image", f"Кадры PNG: {len(frames)} шт. (папка «кадры»)"))
+            elif frames_dir.exists():
+                shutil.rmtree(frames_dir, ignore_errors=True)   # only the sprite sheet was wanted
+            if not made:
+                raise RuntimeError("ничего не сохранилось" + (": " + " ".join(notes) if notes else ""))
+            if out_root:   # ComfyUI's raw sub-folders are duplicates of what is now laid out above
+                for sub in ("alpha_frames", "webp", "telegram", "video"):
+                    shutil.rmtree(dest / sub, ignore_errors=True)
+        except Exception as e:
+            self.note_error(f"Анимированные иконки: {e}")
+            await self.broadcast({"type": "error", "prompt_id": pid, "message": f"Анимированные иконки: {e}"})
+            return
+        items = []
+        for path, kind, sub in made:
+            item = dict(job["meta"], id=uuid.uuid4().hex[:12], prompt_id=pid, date=datetime.now().isoformat(timespec="seconds"), fav=False,
+                        file={"type": "local", "path": str(path), "filename": path.name}, ext=path.suffix.lstrip(".").lower(), kind=kind, sub=sub)
+            item.pop("icons", None)
+            self.library.add(item)
+            items.append(self.public(item))
+        await self.broadcast({"type": "done", "prompt_id": pid, "item": items[0], "items": items,
+                              "icons": {"folder": str(dest), "frames": len(frames), "notes": notes}})
 
     async def h_generate_actor(self, req):
         await self.need_models("actor")
@@ -3541,6 +4864,90 @@ class App:
                 return web.Response(body=data, content_type="audio/flac")
         return web.json_response({"error": "Отделение голоса заняло слишком много времени"}, status=504)
 
+    async def sheet_ready(self):
+        """(ok, reason, code) - is the SheetSage2 node (built into ComfyUI 0.37+) there and is its model visible to ComfyUI."""
+        if self.rh():
+            return False, "Точный план песни считается на этом компьютере, а сейчас включено облако.", "cloud"
+        try:
+            _, node = await self.comfy_json("GET", "/object_info/SheetSage2AudioToABC", timeout=aiohttp.ClientTimeout(total=15))
+            _, enc = await self.comfy_json("GET", "/object_info/AudioEncoderLoader", timeout=aiohttp.ClientTimeout(total=15))
+        except aiohttp.ClientError:
+            return False, "ComfyUI не запущен.", "off"
+        if not node or "SheetSage2AudioToABC" not in node:
+            return False, "В вашем ComfyUI нет ноды SheetSage2 (она встроена в ComfyUI версии 0.37 и новее). Обновите ComfyUI.", "node"
+        try:
+            spec = enc["AudioEncoderLoader"]["input"]["required"]["audio_encoder_name"]
+            names = spec[1].get("options", []) if spec and spec[0] == "COMBO" else spec[0]   # new ComfyUI: ["COMBO", {options}], old: [[names]]
+        except (KeyError, TypeError, IndexError, AttributeError):
+            names = []
+        self._sheet_name = next((n for n in names if str(n).replace("\\", "/").split("/")[-1] == sheetsage.MODEL_FILE), None)
+        if not self._sheet_name:
+            return False, f"Нет модели {sheetsage.MODEL_FILE} (1,3 ГБ). Скачайте её и положите в папку {sheetsage.MODEL_DIR} вашего ComfyUI, затем перезапустите ComfyUI.", "model"
+        return True, "", ""
+
+    async def h_clip_abc_info(self, _req):
+        ok, reason, code = await self.sheet_ready()
+        return web.json_response({"available": ok, "reason": reason, "code": code, "url": sheetsage.MODEL_URL, "file": sheetsage.MODEL_FILE})
+
+    async def h_clip_abc(self, req):
+        """WAV (a piece of the song) in -> the plan from the notes: {abc, plan, runs}. The slow part is ComfyUI; usually under a minute."""
+        ok, reason, code = await self.sheet_ready()
+        if not ok:
+            return web.json_response({"error": reason, "code": code, "url": sheetsage.MODEL_URL}, status=400)
+        name, mode, total = None, "melody", 0.0
+        async for field in await req.multipart():
+            if field.name == "file" and field.filename:
+                name = await self.upload_input(field)
+            elif field.name == "mode":
+                mode = "full" if (await field.text()) == "full" else "melody"
+            elif field.name == "total":
+                try:
+                    total = float(await field.text())
+                except ValueError:
+                    total = 0.0
+        if not name:
+            return web.json_response({"error": "Нет аудио"}, status=400)
+        await self.stop_llm()  # the agent's model would compete for video memory
+        graph = {
+            "1": {"class_type": "LoadAudio", "inputs": {"audio": name}},
+            "2": {"class_type": "AudioEncoderLoader", "inputs": {"audio_encoder_name": self._sheet_name}},
+            "3": {"class_type": "SheetSage2AudioToABC", "inputs": {"audio_encoder": ["2", 0], "audio": ["1", 0], "mode": mode}},
+            "4": {"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}},
+        }
+        status, res = await self.comfy_json("POST", "/prompt", json={"prompt": graph, "client_id": CLIENT_ID})
+        if status != 200:
+            return web.json_response({"error": comfy_error_text(res)}, status=400)
+        pid = res["prompt_id"]
+        loop = asyncio.get_running_loop()
+        end = loop.time() + 900
+        while loop.time() < end:
+            await asyncio.sleep(1.5)
+            _, hist = await self.comfy_json("GET", f"/history/{pid}")
+            entry = (hist or {}).get(pid)
+            if not entry:
+                continue
+            st = entry.get("status", {})
+            if st.get("status_str") == "error":
+                msgs = [m[1].get("exception_message", "") for m in st.get("messages", []) if m[0] == "execution_error"]
+                return web.json_response({"error": "Не удалось получить ноты: " + (msgs[0].strip() if msgs else "ошибка ComfyUI")}, status=500)
+            texts = [t for out in entry.get("outputs", {}).values() for t in (out.get("text") or [])]
+            if texts:
+                abc = "\n".join(str(t) for t in texts)
+                if abc.lstrip().startswith(("[", '"')):   # a list of strings shown as JSON
+                    try:
+                        j = json.loads(abc)
+                        abc = "\n".join(j) if isinstance(j, list) else str(j)
+                    except ValueError:
+                        pass
+                try:
+                    plan = sheetsage.parse(abc, total)
+                except Exception as e:
+                    return web.json_response({"error": f"Не удалось разобрать ноты: {e}", "abc": abc}, status=500)
+                if not plan["runs"]:
+                    return web.json_response({"error": "В нотах не нашлось ни одного такта. Попробуйте другой кусок трека.", "abc": abc}, status=500)
+                return web.json_response({"abc": abc, "plan": plan, "text": sheetsage.plan_text(plan)})
+        return web.json_response({"error": "Расчёт нот занял слишком много времени"}, status=504)
+
     # ---------- Voice Lab (OmniVoice through ComfyUI, see voicelab.py) ----------
 
     async def voice_model_options(self):
@@ -3575,6 +4982,9 @@ class App:
 
     async def h_voice_progress(self, _req):
         """How far the download of the voice conversion model is: it lands in <ComfyUI>/models/tts/chatterbox, unfinished files end with .incomplete."""
+        dl = getattr(self, "voice_dl", None)
+        if dl:   # the program itself is completing the OmniVoice model
+            return web.json_response({"downloading": True, "bytes": dl.get("done", 0), "total": dl.get("total", 0), "label": dl.get("label", "")})
         dirs = []
         if self.config.get("engine") == "managed" and self.comfy_root():
             dirs.append(self.comfy_root() / "ComfyUI" / "models" / "tts" / "chatterbox")
@@ -3688,7 +5098,32 @@ class App:
         if py and pack is voicelab.VOICE_PACK:
             if not await self.voice_pip_fix(py, root):
                 pip_ok = False
+        if py and pack is voicelab.VC_PACK:
+            if not await self.vc_pip_fix(py, root):
+                pip_ok = False
         return web.json_response({"ok": True, "pip": pip_ok, "python_found": bool(py)})
+
+    async def vc_pip_fix(self, py, root):
+        """«Своя интонация» (Chatterbox VC): its watermark library `perth` needs `pkg_resources`, which new setuptools no longer has; then
+        `perth.PerthImplicitWatermarker` is silently missing («module 'perth' has no attribute 'PerthImplicitWatermarker'»). An older setuptools
+        brings pkg_resources back. True when perth works afterwards."""
+        extra = {"env": engine.local_env(root)} if root else {}
+
+        async def run_py(*args, timeout=600):
+            p = await asyncio.create_subprocess_exec(str(py), "-s", *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                                                     creationflags=engine.CREATE_NO_WINDOW, **extra)
+            _, err = await asyncio.wait_for(p.communicate(), timeout)
+            return p.returncode, err.decode("utf-8", "ignore")
+        check = "import perth; assert getattr(perth, 'PerthImplicitWatermarker', None) is not None"
+        try:
+            if (await run_py("-c", check, timeout=180))[0] == 0:
+                return True
+            if (await run_py("-m", "pip", "install", "setuptools<81"))[0] != 0:
+                return False
+            return (await run_py("-c", check, timeout=180))[0] == 0
+        except (OSError, asyncio.TimeoutError) as e:
+            print(f"Voice Lab (VC) packages: {type(e).__name__}: {e}", file=sys.stderr)
+            return False
 
     async def voice_pip_fix(self, py, root):
         """The node installs «omnivoice» with --no-deps, so some of its libraries are missing: Python 3.13 has no built-in «audioop» (pydub fails with
@@ -3746,14 +5181,14 @@ class App:
         typ = body.get("type") if body.get("type") in reflab.TYPES else "character"
         if not imgs:
             raise web.HTTPBadRequest(text="Сначала добавьте картинку: по ней программа составит описание")
-        if self.jobs:
+        if self.jobs and not self.remote():
             raise web.HTTPBadRequest(text="Идёт генерация: описание можно будет сделать, когда она закончится.")
         variant = await self.llm_variant()
-        if not self.llm.installed(variant):
+        if not self.remote() and not self.llm.installed(variant):
             raise web.HTTPBadRequest(text="Модель агента ещё не скачана: её можно скачать в разделе «Агент». Пока впишите описание вручную.")
-        if not self.llm.vision(variant):
+        if not self.remote() and not self.llm.vision(variant):
             raise web.HTTPBadRequest(text="У выбранной модели агента нет файла «зрения» (mmproj): она не видит картинки. Впишите описание вручную.")
-        if not self.llm.alive():
+        if not self.remote() and not self.llm.alive():
             try:
                 await self.comfy_json("POST", "/free", json={"unload_models": True, "free_memory": True})
             except Exception:
@@ -3768,7 +5203,7 @@ class App:
         payload = {"messages": [{"role": "user", "content": [{"type": "text", "text": ask}] + [{"type": "image_url", "image_url": {"url": u}} for u in imgs]}],
                    "stream": False, "temperature": 0.3, "chat_template_kwargs": {"enable_thinking": False}, "thinking_budget_tokens": 0}
         try:
-            async with self.session.post(self.llm.url + "/v1/chat/completions", json=payload, timeout=aiohttp.ClientTimeout(total=240)) as r:
+            async with self.llm_post(payload, timeout=aiohttp.ClientTimeout(total=240)) as r:
                 if r.status != 200:
                     raise RuntimeError(f"ошибка {r.status}")
                 text = (await r.json())["choices"][0]["message"].get("content") or ""
@@ -3804,6 +5239,86 @@ class App:
         if status != 200:
             raise web.HTTPBadGateway(text="Не удалось передать звук в ComfyUI")
         return f'{res["subfolder"]}/{res["name"]}' if res.get("subfolder") else res["name"]
+
+    VOICE_REPOS = {"OmniVoice-bf16": "drbaph/OmniVoice-bf16", "OmniVoice": "k2-fsa/OmniVoice"}
+
+    async def voice_models_dir(self):
+        """<ComfyUI>/models/omnivoice of the ComfyUI we work with (own or the user's), or None when we cannot tell where it is."""
+        cands = []
+        if self.config.get("engine") == "managed" and self.comfy_root():
+            cands.append(self.comfy_root() / "ComfyUI" / "models")
+        py = getattr(self, "_vc_py", None) or await self.running_comfy_python()
+        if py:
+            self._vc_py = py
+            cands.append(py.parent.parent / "ComfyUI" / "models")
+        for c in cands:
+            if c.is_dir():
+                return c / "omnivoice"
+        return None
+
+    async def voice_model_fix(self, name):
+        """The node counts a model folder as downloaded as soon as it holds config.json, so an interrupted download (no model.safetensors,
+        no audio_tokenizer) is never repeated and every speech fails. Here the folder is checked against the file list of the repository and
+        the missing or short files are downloaded again (resumable, through the mirror when the user chose one)."""
+        name = str(name or "").replace(" (auto download)", "")
+        repo = self.VOICE_REPOS.get(name)
+        base = await self.voice_models_dir() if repo else None
+        if not base:
+            return
+        dest = base / name
+        api = engine.mirrored(f"https://huggingface.co/api/models/{repo}/tree/main?recursive=1")
+        try:
+            async with self.session.get(api, proxy=engine.system_proxy(), timeout=aiohttp.ClientTimeout(total=40)) as r:
+                if r.status != 200:
+                    raise RuntimeError(f"HTTP {r.status}")
+                tree = await r.json(content_type=None)
+        except Exception as e:
+            if dest.is_dir() and (dest / "model.safetensors").is_file() and (dest / "audio_tokenizer" / "model.safetensors").is_file():
+                return   # cannot check, but the main files are there
+            raise RuntimeError(f"Не удалось узнать список файлов модели голоса ({str(e)[:80]}). Проверьте интернет или включите зеркало Hugging Face в настройках.")
+        files = [(t["path"], int((t.get("lfs") or {}).get("size") or t.get("size") or 0)) for t in tree if t.get("type") == "file" and not t["path"].endswith((".gitattributes", "README.md"))]
+        todo = []
+        for rel, size in files:
+            f = dest / rel
+            if not f.is_file() or (size and f.stat().st_size != size):
+                todo.append((rel, size))
+        if not todo:
+            return
+        total = sum(s for _, s in todo)
+        self.voice_dl = {"label": "Докачиваем модель голоса", "done": 0, "total": total}
+        try:
+            for rel, size in todo:
+                f = dest / rel
+                url = engine.mirrored(f"https://huggingface.co/{repo}/resolve/main/{rel}")
+                f.parent.mkdir(parents=True, exist_ok=True)
+                part = f.with_name(f.name + ".part")
+                if f.exists():
+                    f.unlink()
+                for attempt in range(30):   # a break of the connection: wait and go on from the saved .part
+                    have = part.stat().st_size if part.exists() else 0
+                    try:
+                        async with self.session.get(url, headers={"Range": f"bytes={have}-"} if have else {}, proxy=engine.system_proxy(), timeout=aiohttp.ClientTimeout(sock_read=120)) as r:
+                            if r.status == 416:
+                                break
+                            if r.status not in (200, 206):
+                                raise RuntimeError(f"HTTP {r.status}")
+                            if r.status == 200:
+                                have = 0
+                            with open(part, "ab" if have else "wb") as out:
+                                async for chunk in r.content.iter_chunked(1 << 20):
+                                    out.write(chunk)
+                                    self.voice_dl["done"] = self.voice_dl.get("done", 0) + len(chunk)
+                            break
+                    except Exception as e:
+                        if attempt == 29:
+                            raise RuntimeError(f"Не удалось скачать {rel}: {str(e)[:80]}")
+                        await asyncio.sleep(min(20, 3 + attempt * 2))
+                if size and part.stat().st_size != size:
+                    part.unlink(missing_ok=True)
+                    raise RuntimeError(f"Файл {rel} скачался не полностью. Нажмите «Озвучить» ещё раз.")
+                part.replace(f)
+        finally:
+            self.voice_dl = None
 
     async def h_voice_generate(self, req):
         """One speech: mode design / clone / dialog. Blocks until ComfyUI is done (the first run also downloads the model: minutes)."""
@@ -3907,6 +5422,11 @@ class App:
                 return web.json_response({"error": "Неизвестный режим"}, status=400)
         except web.HTTPException as e:
             return web.json_response({"error": e.text or "Ошибка"}, status=e.status)
+        if mode != "vc":
+            try:
+                await self.voice_model_fix(model)   # an unfinished download of the model is completed here, not left to the node
+            except RuntimeError as e:
+                return web.json_response({"error": str(e)}, status=502)
         await self.stop_llm()   # the agent's model would compete for video memory
         status, res = await self.comfy_json("POST", "/prompt", json={"prompt": graph, "client_id": CLIENT_ID})
         if status != 200:
@@ -3930,12 +5450,21 @@ class App:
                 m0 = (msgs[0].strip() if msgs else "ошибка ComfyUI")
                 if "nterrupt" in m0:
                     return web.json_response({"error": "Остановлено"}, status=499)
+                if re.search(r"PerthImplicitWatermarker|module 'perth'", m0):   # «Своя интонация»: perth lacks pkg_resources, an older setuptools brings it back
+                    py = await self.running_comfy_python()
+                    managed = self.config.get("engine") == "managed" and self.comfy_root()
+                    py = py or (self.comfy_root() / "python_embeded" / "python.exe" if managed else None)
+                    if py and Path(py).is_file() and await self.vc_pip_fix(py, self.comfy_root() if managed else None):
+                        return web.json_response({"error": "Для «Своей интонации» не хватало служебной библиотеки (pkg_resources), я её доустановила. Теперь перезапустите ComfyUI (или программу) и повторите озвучку.", "fixed": True}, status=500)
+                    return web.json_response({"error": "Не удалось подготовить «Свою интонацию»: в Python вашего ComfyUI нужно выполнить команду  python -m pip install \"setuptools<81\"  и перезапустить ComfyUI. Исходная ошибка: " + m0[:300]}, status=500)
                 if re.search(r"requires .accelerate|No module named|pyaudioop", m0):   # a library of the voice module is missing: put it in, the restart makes ComfyUI see it
                     py = await self.running_comfy_python()
                     managed = self.config.get("engine") == "managed" and self.comfy_root()
                     py = py or (self.comfy_root() / "python_embeded" / "python.exe" if managed else None)
                     if py and Path(py).is_file() and await self.voice_pip_fix(py, self.comfy_root() if managed else None):
                         return web.json_response({"error": "Для голоса не хватало служебной библиотеки, я её доустановила. Теперь нажмите «Перезапустить программу» и повторите озвучку.", "fixed": True}, status=500)
+                if re.search(r"no file named (model\.safetensors|pytorch_model)", m0, re.I):   # files of the model are missing: the repeat completes the download
+                    return web.json_response({"error": "Файлы модели голоса скачались не до конца. Нажмите «Озвучить» ещё раз: программа сама докачает недостающее. Если снова не получится, проверьте интернет или включите зеркало Hugging Face в настройках."}, status=500)
                 return web.json_response({"error": "Не удалось сделать голос: " + m0[:600]}, status=500)
             audio = next((f for out in entry.get("outputs", {}).values() for f in out.get("audio", [])), None)
             if audio:
@@ -3951,8 +5480,85 @@ class App:
                 return web.json_response(take)
         return web.json_response({"error": "Озвучка заняла слишком много времени"}, status=504)
 
+    # ---- Agent / LLM through an online service (the user's own key)
+    def remote(self):
+        return llmapi.settings(self.config.get("llm_api"))
+
+    def llm_post(self, payload, **kw):
+        """The same request goes to the local model or, when the online connection is on, to the service."""
+        conn = self.remote()
+        if not conn:
+            return self.session.post(self.llm.url + "/v1/chat/completions", json=payload, **kw)
+        url, headers, body = llmapi.prepare(payload, conn)
+        return self.session.post(url, json=body, headers=headers, **kw)
+
+    async def h_llmapi_get(self, _req):
+        c = self.config.get("llm_api") or {}
+        return web.json_response({"on": bool(c.get("on")), "svc": c.get("svc") or "openrouter", "model": c.get("model") or "", "url": c.get("url") or "",
+                                  "has_key": bool(c.get("key")), "ready": bool(self.remote()),
+                                  "services": {k: {"title": v[0], "model": v[2], "keyurl": v[3]} for k, v in llmapi.SERVICES.items()}})
+
+    async def h_llmapi_set(self, req):
+        b = await req.json()
+        c = dict(self.config.get("llm_api") or {})
+        if b.get("clear"):
+            c = {}
+        else:
+            if b.get("svc") in llmapi.SERVICES:
+                c["svc"] = b["svc"]
+            for k in ("model", "url"):
+                if k in b:
+                    c[k] = str(b[k]).strip()[:300]
+            key = str(b.get("key") or "").strip()
+            if key:
+                c["key"] = llmapi.protect(key)
+            if "on" in b:
+                c["on"] = bool(b["on"])
+        self.config.update(llm_api=c)
+        return await self.h_llmapi_get(req)
+
+    async def h_llmapi_test(self, req):
+        b = await req.json()
+        c = dict(self.config.get("llm_api") or {})
+        c.update(on=True)
+        for k in ("svc", "model", "url"):
+            if b.get(k):
+                c[k] = str(b[k]).strip()
+        if str(b.get("key") or "").strip():
+            c["key"] = llmapi.protect(str(b["key"]).strip())
+        conn = llmapi.settings(c)
+        if not conn:
+            return web.json_response({"ok": False, "error": "Заполните ключ" + (" и адрес сервиса с названием модели." if c.get("svc") == "other" else ".")})
+        url, headers, body = llmapi.prepare({"messages": [{"role": "user", "content": "Reply with one word: ok"}], "max_tokens": 16, "stream": False}, conn)
+        try:
+            async with self.session.post(url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=40)) as r:
+                if r.status != 200:
+                    return web.json_response({"ok": False, "error": llmapi.friendly_error(r.status, await r.text())})
+                await r.json()
+        except Exception as e:
+            return web.json_response({"ok": False, "error": "Нет связи с сервисом: " + (str(e) or "проверьте интернет и адрес")[:160]})
+        return web.json_response({"ok": True})
+
+    async def h_free_mem(self, req):
+        """Sidebar buttons: unload models from the video card / also clear the caches (ComfyUI applies it between jobs)."""
+        full = bool((await req.json()).get("full"))
+        try:
+            await self.comfy_json("POST", "/free", json={"unload_models": True, "free_memory": full})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)[:200]}, status=502)
+        return web.json_response({"ok": True})
+
     async def h_interrupt(self, req):
         pid = (await req.json()).get("prompt_id")
+        if pid in self.ff_procs:   # a montage written by ffmpeg
+            box = self.ff_procs[pid]
+            box["stopped"] = True
+            if box.get("proc"):
+                try:
+                    box["proc"].kill()
+                except ProcessLookupError:
+                    pass
+            return web.json_response({"ok": True})
         job = self.jobs.get(pid)
         if job and job.get("task"):  # cloud task
             self.jobs.pop(pid, None)
@@ -4482,7 +6088,7 @@ class App:
             await resp.write(f"data: {ag.dumps(obj)}\n\n".encode())
 
         try:
-            if self.jobs:   # the agent's model would compete with the video for video memory: wait for the end of the generation, then start by itself
+            if self.jobs and not self.remote():   # the agent's model would compete with the video for video memory: wait for the end of the generation, then start by itself
                 waited = 0
                 while self.jobs:
                     if req.transport is None or req.transport.is_closing():   # the user stopped the request or left
@@ -4491,9 +6097,9 @@ class App:
                     await asyncio.sleep(3)
                     waited += 3
             variant = await self.llm_variant()
-            if not self.llm.installed(variant):
+            if not self.remote() and not self.llm.installed(variant):
                 raise RuntimeError("Модель агента ещё не скачана.")
-            if not self.llm.alive():
+            if not self.remote() and not self.llm.alive():
                 await send({"type": "status", "text": "Освобождаем видеопамять…"})
                 try:
                     await self.comfy_json("POST", "/free", json={"unload_models": True, "free_memory": True})
@@ -4503,7 +6109,7 @@ class App:
                 self.llm.start(variant)
                 await ag.wait_ready(self.session, self.llm)
 
-            if not self.llm.vision(variant) and any(m.get("images") for m in messages):
+            if not self.remote() and not self.llm.vision(variant) and any(m.get("images") for m in messages):
                 # without a vision projector the model cannot take pictures
                 messages = [dict(m, images=None) for m in messages]
                 await send({"type": "status", "text": "У этой модели нет файла «зрения» (mmproj) — изображения она не увидит"})
@@ -4518,6 +6124,9 @@ class App:
                 active = [s for s in self.skills.list() if s["id"] in want]
             await send({"type": "skills", "names": [s["name"] for s in active]})
             system = ag.system_prompt("\n\n".join(self.skills.text(s) for s in active), target, ctx)
+            if self.remote():   # the real model answers, so it must say who it is (otherwise it repeats «an assistant of the program»)
+                system += (f"\n\nТы работаешь на модели «{self.remote()['model']}», она подключена через интернет-сервис. Если пользователь спрашивает, какая ты модель, "
+                           "назови именно её (и разработчика, если знаешь). Не говори, что ты локальная модель программы.")
             if target == "chat" and body.get("project"):   # a project is open: its skills, summary and documents go to the model
                 q = next((m.get("content") or "" for m in reversed(messages) if m["role"] == "user"), "")
                 pctx = await asyncio.to_thread(self.projects.context, str(body["project"]), q)
@@ -4549,10 +6158,10 @@ class App:
                 # (about 2000 characters of thoughts) and 1.5 s without; the long-video rules took minutes with it
                 payload["chat_template_kwargs"] = {"enable_thinking": False}
                 payload["thinking_budget_tokens"] = 0
-            async with self.session.post(self.llm.url + "/v1/chat/completions", json=payload,
+            async with self.llm_post(payload,
                                          timeout=aiohttp.ClientTimeout(total=None, sock_read=600)) as r:
                 if r.status != 200:
-                    raise RuntimeError(f"Модель ответила ошибкой {r.status}: {(await r.text())[:300]}")
+                    raise RuntimeError(llmapi.friendly_error(r.status, await r.text()) if self.remote() else f"Модель ответила ошибкой {r.status}: {(await r.text())[:300]}")
                 async for raw in r.content:
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:") or line == "data: [DONE]":
@@ -4580,7 +6189,7 @@ class App:
                  "Не пиши дату и время, если пользователь про них не спрашивал."},
                 {"role": "user", "content": text}],
                 "stream": False, "temperature": 0, "max_tokens": 40, "chat_template_kwargs": {"enable_thinking": False}, "thinking_budget_tokens": 0}
-            async with self.session.post(self.llm.url + "/v1/chat/completions", json=payload, timeout=aiohttp.ClientTimeout(total=40)) as r:
+            async with self.llm_post(payload, timeout=aiohttp.ClientTimeout(total=40)) as r:
                 data = await r.json()
             q = (data["choices"][0]["message"].get("content") or "").strip().strip('"«»').splitlines()[0].strip()
             return q if 2 <= len(q) <= 200 else text
@@ -4593,13 +6202,13 @@ class App:
         text = (body.get("text") or "").strip()[:8000]
         if not text:
             return web.json_response({"error": "Нечего переводить"}, status=400)
-        if self.jobs:
+        if self.jobs and not self.remote():
             return web.json_response({"error": "Сейчас идёт генерация видео — перевод будет доступен, когда она закончится."}, status=409)
         variant = await self.llm_variant()
-        if not self.llm.installed(variant):
+        if not self.remote() and not self.llm.installed(variant):
             return web.json_response({"error": "Модель агента ещё не скачана."}, status=400)
         try:
-            if not self.llm.alive():
+            if not self.remote() and not self.llm.alive():
                 try:
                     await self.comfy_json("POST", "/free", json={"unload_models": True, "free_memory": True})
                 except Exception:
@@ -4615,7 +6224,7 @@ class App:
                                                                             "только переведи):\n\n<<<\n" + text + "\n>>>"}],
                        "stream": False, "temperature": 0.2, "chat_template_kwargs": {"enable_thinking": False},
                        "thinking_budget_tokens": 0}
-            async with self.session.post(self.llm.url + "/v1/chat/completions", json=payload,
+            async with self.llm_post(payload,
                                          timeout=aiohttp.ClientTimeout(total=300)) as r:
                 if r.status != 200:
                     return web.json_response({"error": f"Модель ответила ошибкой {r.status}"}, status=502)
@@ -4787,10 +6396,10 @@ class App:
     async def h_project_summary(self, req):
         """«Update summary»: the model rewrites the project's summary from the old one and the current chat."""
         pid, body = self._proj(req), await req.json()
-        if self.jobs:
+        if self.jobs and not self.remote():
             return web.json_response({"error": "Сейчас идёт генерация видео — сводку можно обновить, когда она закончится."}, status=409)
         variant = await self.llm_variant()
-        if not self.llm.installed(variant):
+        if not self.remote() and not self.llm.installed(variant):
             return web.json_response({"error": "Модель агента ещё не скачана."}, status=400)
         chat = "\n".join(f"{'Пользователь' if m.get('role') == 'user' else 'Помощник'}: {(m.get('content') or '')[:3000]}"
                          for m in (body.get("messages") or [])[-16:] if m.get("role") in ("user", "assistant") and m.get("content"))
@@ -4798,7 +6407,7 @@ class App:
         if not chat.strip() and not old.strip():
             return web.json_response({"error": "Сводку не из чего собрать: напишите что-нибудь в чате проекта."}, status=400)
         try:
-            if not self.llm.alive():
+            if not self.remote() and not self.llm.alive():
                 try:
                     await self.comfy_json("POST", "/free", json={"unload_models": True, "free_memory": True})
                 except Exception:
@@ -4812,7 +6421,7 @@ class App:
             payload = {"messages": [{"role": "system", "content": system},
                                     {"role": "user", "content": f"СТАРАЯ СВОДКА:\n{old or '(пусто)'}\n\nПОСЛЕДНЯЯ ПЕРЕПИСКА:\n{chat or '(пусто)'}"}],
                        "stream": False, "temperature": 0.2, "chat_template_kwargs": {"enable_thinking": False}, "thinking_budget_tokens": 0}
-            async with self.session.post(self.llm.url + "/v1/chat/completions", json=payload, timeout=aiohttp.ClientTimeout(total=300)) as r:
+            async with self.llm_post(payload, timeout=aiohttp.ClientTimeout(total=300)) as r:
                 if r.status != 200:
                     return web.json_response({"error": f"Модель ответила ошибкой {r.status}"}, status=502)
                 data = await r.json()
@@ -4885,6 +6494,8 @@ def build_app(comfy_override=None):
         web.get("/api/system", state.h_system),
         web.get("/api/audio/info", state.h_audio_info),
         web.post("/api/audio/separate", state.h_audio_separate),
+        web.get("/api/clip/abc/info", state.h_clip_abc_info),
+        web.post("/api/clip/abc", state.h_clip_abc),
         web.get("/api/reflab/presets", state.reflab.h_presets),
         web.post("/api/reflab/prompt", state.reflab.h_prompt),
         web.post("/api/reflab/presets", state.reflab.h_preset_save),
@@ -4921,6 +6532,8 @@ def build_app(comfy_override=None):
         web.post("/api/mode/offered", state.h_mode_offered),
         web.post("/api/setup/cancel", state.h_setup_cancel),
         web.post("/api/comfy/update", state.h_comfy_update),
+        web.post("/api/comfy/fix-torch", state.h_comfy_fix_torch),
+        web.post("/api/comfy/restart", state.h_comfy_restart),
         web.get("/api/settings/comfy-flags", state.h_comfy_flags),
         web.post("/api/settings/comfy-flags", state.h_comfy_flags),
         web.post("/api/open-driver-page", state.h_open_driver),
@@ -4945,6 +6558,22 @@ def build_app(comfy_override=None):
         web.post("/api/upscale", state.h_upscale),
         web.post("/api/upscale_file", state.h_upscale_file),
         web.post("/api/grain", state.h_grain),
+        web.get("/api/td/info", state.h_td_info),
+        web.post("/api/td/install", state.h_td_install),
+        web.post("/api/td/run", state.h_td_run),
+        web.post("/api/td/prepare", state.h_td_prepare),
+        web.post("/api/td/prepare-cancel", state.h_td_prepare_cancel),
+        web.get("/api/td/file", state.h_td_file),
+        web.get("/vendor/{name}", state.h_vendor),
+        web.post("/api/td/save-to", state.h_td_save_to),
+        web.post("/api/td/open", state.h_td_open),
+        web.get("/api/icons/info", state.h_icons_info),
+        web.post("/api/icons/install", state.h_icons_install),
+        web.post("/api/icons/cut", state.h_icons_cut),
+        web.post("/api/icons/prep", state.h_icons_prep),
+        web.post("/api/icons/video", state.h_icons_video),
+        web.post("/api/icons/run", state.h_icons_run),
+        web.post("/api/icons/open", state.h_icons_open),
         web.get("/api/version", lambda _req: web.json_response({"version": APP_VERSION,
                                                                  "built": build_stamp()})),
         web.post("/api/nodes/install", state.h_nodes_install),
@@ -4960,6 +6589,8 @@ def build_app(comfy_override=None):
         web.post("/api/models/pick", state.h_models_pick),
         web.get("/api/models/compat", state.h_models_compat),
         web.post("/api/loras/custom/mode", state.h_loras_custom_mode),
+        web.post("/api/loras/strength", state.h_lora_strength),
+        web.post("/api/image/tune", state.h_image_tune),
         web.post("/api/models/open", state.h_models_open),
         web.post("/api/models/download", state.h_models_download),
         web.post("/api/models/download/cancel", state.h_models_download_cancel),
@@ -4976,6 +6607,10 @@ def build_app(comfy_override=None):
         web.post("/api/generate/swap", state.h_generate_swap),
         web.post("/api/generate/long", state.h_generate_long),
         web.post("/api/montage", state.h_montage),
+        web.post("/api/montage_ff", state.h_montage_ff),
+        web.get("/api/ffmpeg", state.h_ffmpeg),
+        web.get("/api/thumb/{id}", state.h_thumb),
+        web.post("/api/export_to", state.h_export_to),
         web.get("/api/long/state", state.h_long_state),
         web.get("/api/long/project", state.h_long_project),
         web.post("/api/long/project", state.h_long_project),
@@ -4988,6 +6623,10 @@ def build_app(comfy_override=None):
         web.post("/api/cloud/test", state.h_cloud_test),
         web.post("/api/setup/cloud", state.h_setup_cloud),
         web.post("/api/interrupt", state.h_interrupt),
+        web.post("/api/free_mem", state.h_free_mem),
+        web.get("/api/llmapi", state.h_llmapi_get),
+        web.post("/api/llmapi", state.h_llmapi_set),
+        web.post("/api/llmapi/test", state.h_llmapi_test),
         web.get("/api/agent/status", state.h_agent_status),
         web.post("/api/agent/translate", state.h_agent_translate),
         web.post("/api/agent/install", state.h_agent_install),

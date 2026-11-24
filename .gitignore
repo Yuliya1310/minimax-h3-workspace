@@ -39,3 +39,6 @@ __pycache__/
 # помощник (агент), скачанный пользователем в папку проекта, и заметки
 MinimaxH3_assistant/
 Память*.txt
+
+# ffmpeg.exe (100 MB, over the GitHub file limit): copied into app/bin by hand before building
+app/bin/ffmpeg.exe

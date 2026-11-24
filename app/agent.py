@@ -81,7 +81,7 @@ IMAGE_SKILLS = {"plist": "krea-2", "krea": "krea-2", "fluxt": "flux2-klein", "qw
                 "qwen": "qwen-image-2-1-director-prompt", "h3t": "minimax-h3-image", "h3e": "minimax-h3-image", "sheet": "karta-personazha", "sheet6": "karta-personazha",
                 "story": "storyboard", "outpaint": "qwen-image-2-1-director-prompt", "inpaint": "qwen-image-2-1-director-prompt"}
 SCRIPT_SKILLS = ("rezhisser-scenarist", "akterskaya-igra", "drama-minimax-h3")   # the three pillars of the screenwriter chat; the director is the main one
-AGENT_TARGETS = ("chat", "script", "video", "lipsync", "refs", "actor", "swap", "action", "actionsc", "long") + tuple(IMAGE_SKILLS)
+AGENT_TARGETS = ("chat", "script", "video", "lipsync", "refs", "actor", "swap", "action", "actionsc", "long", "icon") + tuple(IMAGE_SKILLS)
 # long extra reference files that would not fit next to the rest into the model's context
 SKIP_REFS = {"platform-adapters.md", "long-form-writing.md", "h3-format.md"}
 
@@ -145,6 +145,8 @@ class Skills:
             if model == "h3img" and target in ("story", "sheet", "sheet6"):   # a storyboard / sheet for MiniMax H3 Image: its own writing rules too
                 ids.append("minimax-h3-image")
             return [s for s in self.list() if s["id"] in ids]
+        if target == "icon":   # animated icons / Telegram stickers: only the H3 prompt rules; the master prompt of this mode is in system_prompt
+            return [s for s in self.list() if s["id"] == "hailuo-h3"]
         text = chat_text.lower()
         res = []
         for s in self.list():
@@ -701,6 +703,32 @@ def system_prompt(skills_text, target, ctx):
             "shadow behind her. Low fast camera following her. Rain, echoing footsteps.\n\n"
             "overall_soundscape: Heavy rain, shouting crowd, running footsteps.\n\n"
             "non_diegetic_music: A tense driving percussion theme.")
+    elif target == "icon":
+        mode_rules = (
+            "Режим приложения: АНИМИРОВАННАЯ ИКОНКА или СТИКЕР (MiniMax H3 по одной картинке, потом из видео вырезается фон). Пользователь загружает "
+            "картинку персонажа (<Picture 1>) и своими словами пишет, что персонаж должен делать. Картинка станет и ПЕРВЫМ, и ПОСЛЕДНИМ кадром видео"
+            + (f" (длина {dur:.0f} с)" if dur else "") + ": анимация зациклена. Ты пишешь мастер-промпт ровно в таком виде, как работает у пользователя:\n"
+            "1. Первая строка: `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.` Затем пустая строка.\n"
+            "2. `integrated_multimodal_description: [Shot 1]` и ОДИН связный абзац по порядку:\n"
+            "   а) стиль: `<вид графики по картинке: 2D cartoon sticker / 3D cartoon mobile game character / pixel art / anime…> animation, exactly the style of <Picture 1>`; "
+            "если у картинки белая кайма стикера или контур, упомяни его;\n"
+            "   б) фон: `the background is <цвет и вид фона С КАРТИНКИ, например plain flat solid green / plain white> and stays identical to <Picture 1> in every frame` "
+            "(посмотри на картинку и назови фон как есть; ничего про сцену, землю, тень, небо, траву, дома и деревья не добавляй);\n"
+            "   в) камера: `Static Shot, the camera does not move, no zoom, no pan, no cuts, the framing, the size and the position of the character stay identical to <Picture 1> for the whole clip`;\n"
+            "   г) действие: персонаж (назови его коротко по картинке, внешность не пересказывай) делает то, что просил пользователь. Расписывай движение по секундам "
+            "(`From 00:00.000 …`, `At 00:01.500 …`) ПО ВСЕЙ ДЛИНЕ клипа: движение идёт до самого конца, без долгого стояния без дела. Двигаются только названные части тела, "
+            "остальное неподвижно, ноги и основание остаются на месте. Скорость плавная, мультяшные движения со squash and stretch, если стиль мультяшный;\n"
+            "   д) конец: `Then he/she/it returns to the exact pose of <Picture 1>, holding it with a slight breathing movement`, чтобы анимация зацикливалась без шва;\n"
+            "   е) последняя фраза-запрет в утвердительной форме: `All movement is smooth, no new objects appear, no scenery, no background change, no light rays, no particles, "
+            "no camera effects, the outfit, props, fur and colors keep the same shape and color.`\n"
+            "3. `overall_soundscape:` одна короткая строка со звуком действия (взмах, шаги, шелест ткани) или `N/A`.\n"
+            "4. `non_diegetic_music: N/A`.\n"
+            "Если пользователь не сказал, что персонаж должен делать, задай ОДИН короткий вопрос. Если сказал слишком коротко (например «бьёт мечом»), сам придумай аккуратное "
+            "понятное движение. Не придумывай ничего вне кадра картинки, не добавляй камеру, наезды, фон, эффекты, других персонажей, реплики и текст. "
+            "ВАЖНО: модель рисует всё, что названо в тексте, даже в сравнении. Поэтому никогда не пиши предметы и места, которых нет на картинке (наковальня, земля, пол, камни, пыль, искры, дым, трава, стена), "
+            "и сравнения вроде «как по наковальне», «как по барабану». Если пользователь назвал такой предмет, опиши только движение персонажа без него. Удар, прыжок или шаг "
+            "описывай как движение тела и предмета в руке в пустом пространстве. "
+            "Промпт только английский, одним блоком prompt.")
     elif target == "swap":
         mode_rules = (
             "Режим приложения: ЗАМЕНА ПЕРСОНАЖА (MiniMax H3 Ref2V + LoRA замены). Пользователь загружает видео (<Video 1>), в котором "
@@ -755,6 +783,15 @@ def system_prompt(skills_text, target, ctx):
             align = "картинок нет - T2VA, без строки выравнивания"
         mode_rules = (f"Режим приложения: ГЕНЕРАЦИЯ ВИДЕО (FastH3: текст / первый кадр / первый и последний кадр). "
                       f"Сейчас {align}. Длительность клипа {dur or 5} с - таймкоды шотов не выходят за неё.")
+    if target in ("krea", "plist", "fluxt", "qwent", "h3t"):
+        mode_rules += (
+            "\n\nГЛАВНОЕ: рисуй РОВНО то, что описал пользователь (его герой, животное, предмет, место, стиль). Примеры внутри скилла показывают только ФОРМАТ ответа; их содержимое (девушка, портрет, кроссовки, афиша) НЕЛЬЗЯ переносить в ответ. Не меняй героя пользователя на человека и тем более на девушку. Если героя он не называл как человека, людей в кадре нет. Не добавляй людей, которых он не просил. Перед выдачей сверь: главный объект промпта совпадает с тем, что написал пользователь.")
+    if target in ("krea", "plist", "fluxt", "qwent", "h3t") and not n_img:
+        mode_rules += (
+            "\n\nНЕТ ПРИЛОЖЕННЫХ КАРТИНОК, И ОНИ НЕ НУЖНЫ: картинка рисуется только по тексту. Сразу напиши готовый промпт по описанию "
+            "пользователя, пусть оно и короткое (например «волк в хвойном лесу под луной»): сам выбери стиль, ракурс, свет, цвет и "
+            "композицию. Не проси прислать фото или референс, не пиши «пришлите», «я скину», «загрузите», не задавай уточняющих "
+            "вопросов. Ответ: одна строка подсказки по формату кадра и блок prompt.")
     if ctx.get("model") == "h3img" and target in ("story", "sheet", "sheet6"):
         # the user chose MiniMax H3 Image for this storyboard / character sheet: it overrides the model words in the rules above
         mode_rules += (
