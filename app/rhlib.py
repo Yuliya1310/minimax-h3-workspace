@@ -106,9 +106,11 @@ CARDS["actionsc"] = {
 }
 
 
-CARDS["studio"] = {**CARDS["actionsc"], "wf_default": "2123839054161072130", "title": "Видеостудия",
+# IDs shipped by earlier versions (without the loading nodes for the hero videos): a saved copy of them counts as «not set»
+OLD_DEFAULTS = {"studio": "2123839054161072130", "clip": "2123840263789957122"}
+CARDS["studio"] = {**CARDS["actionsc"], "wf_default": "2125298075140104194", "title": "Видеостудия",
                    "text": "Видеостудия на RunningHub: сцены подряд, каждая продолжает последний кадр прошлой. Свой номер workflow и общий API-ключ."}
-CARDS["clip"] = {**CARDS["actionsc"], "wf_default": "2123840263789957122", "title": "Создание клипа",
+CARDS["clip"] = {**CARDS["actionsc"], "wf_default": "2125299015235854338", "title": "Создание клипа",
                  "text": "Клип под вашу музыку на RunningHub: каждая сцена получает свой кусок песни. Свой номер workflow и общий API-ключ."}
 
 

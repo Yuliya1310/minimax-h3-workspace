@@ -46,7 +46,7 @@ def build(base, p, files):
     ref = add("MiniMaxH3ReferenceToVideo", clip=["4", 0], vae=["5", 0], audio_vae=["6", 0], prompt=p["prompt"],
               width=width, height=height, length=total, ref_image_size=p.get("ref_size") or "max")
     pick = lambda key: [files[k] for k in sorted((k for k in files if k.startswith(key) and k[len(key):].isdigit()), key=lambda k: int(k[len(key):]))]
-    wf._refs(g, ref, pick("img"), videos=pick("vid"), audios=pick("aud"), base=100)
+    wf._refs(g, ref, pick("img"), videos=pick("rvid") + pick("vid"), audios=pick("aud"), base=100)   # the server passes the Reference Mode videos (and the user's camera videos) as rvid0..: they were skipped before
     new = add("LTXVSeparateAVLatent", av_latent=[ref, 1])
     voice = files.get("voice")
     song = files.get("song")   # Clip: a piece of the user's song that starts `song_lead` seconds before this scene; the overlap with the previous scene hears the real song

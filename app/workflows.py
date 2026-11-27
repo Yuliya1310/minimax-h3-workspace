@@ -126,20 +126,43 @@ def _refs(g, cond_node, images, videos=(), audios=(), base=100, vsize=None):
         + [str(base + 20 + i) for i in range(len(audios[:3]))]
 
 
-def tune_sampling(g, cfg=None, steps=None):
-    """The user's own CFG / steps for a picture graph (None = as the graph has it). Only the main pass (denoise 1): the second pass of
-    Krea Real keeps its own. CFG goes to KSampler and CFGGuider (a BasicGuider has no CFG: MiniMax H3 Image takes only the steps)."""
+def tune_sampling(g, cfg=None, steps=None, sampler=None, scheduler=None, shift=None, refine=None):
+    """The user's own settings of a picture graph (None = as the graph has it, which is the recommended value).
+    CFG and steps: the main pass only (denoise 1); `refine` is the denoise of a second pass (Krea Real). CFG goes to KSampler and CFGGuider
+    (a BasicGuider has no CFG). Sampler and scheduler: every pass (FLUX.2 has its own scheduler). `shift`: Krea 2 and Qwen Image only."""
     for v in g.values():
         ct, inp = v.get("class_type"), v.get("inputs", {})
-        if ct == "KSampler" and float(inp.get("denoise", 1) or 1) >= 0.99:
-            if cfg is not None:
+        main = float(inp.get("denoise", 1) or 1) >= 0.99
+        if ct == "KSampler":
+            if main and cfg is not None:
                 inp["cfg"] = cfg
-            if steps is not None:
+            if main and steps is not None:
                 inp["steps"] = steps
+            if not main and refine is not None:
+                inp["denoise"] = refine
+            if sampler:
+                inp["sampler_name"] = sampler
+            if scheduler:
+                inp["scheduler"] = scheduler
+        elif ct == "KSamplerSelect" and sampler:
+            inp["sampler_name"] = sampler
         elif ct == "CFGGuider" and cfg is not None:
             inp["cfg"] = cfg
-        elif ct in ("BasicScheduler", "Flux2Scheduler") and steps is not None and float(inp.get("denoise", 1) or 1) >= 0.99:
-            inp["steps"] = steps
+        elif ct in ("BasicScheduler", "Flux2Scheduler"):
+            if main and steps is not None:
+                inp["steps"] = steps
+            if ct == "BasicScheduler" and scheduler:
+                inp["scheduler"] = scheduler
+    if shift is not None and "own-shift-0" not in g:
+        done = {}
+        users = [v["inputs"] for v in g.values() if v.get("class_type") in ("KSampler", "CFGGuider", "BasicGuider", "BasicScheduler")]
+        for inp in users:
+            src = tuple(inp["model"])
+            if src not in done:   # the same shift at every size (max = base), put right before the sampler, after any LoRA
+                done[src] = f"own-shift-{len(done)}"
+                g[done[src]] = {"class_type": "ModelSamplingFlux", "inputs": {
+                    "model": list(src), "max_shift": shift, "base_shift": shift, "width": 1024, "height": 1024}}
+            inp["model"] = [done[src], 0]
     return g
 
 
@@ -1387,7 +1410,8 @@ def lipsync_prompt(text, n_refs, n_videos=0, cam_videos=(), n_audio=0, audio_lab
         else:
             keep.append(ln)
     text = "\n".join(keep).strip()
-    return (defs + head + f"integrated_multimodal_description: [Shot 1] {text}\n\n"
+    body = text if text.lstrip().startswith("[Shot 1]") else "[Shot 1] " + text   # the agent may already label its shots (the official H3 format)
+    return (defs + head + f"integrated_multimodal_description: {body}\n\n"
             f"overall_soundscape: {sound}\n\nnon_diegetic_music: {music}")
 
 

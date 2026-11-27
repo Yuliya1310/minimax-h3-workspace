@@ -10,6 +10,7 @@ own ComfyUI or installs one (plus node packs and models) and manages it.
 
 import argparse
 import asyncio
+import contextvars
 import hashlib
 import json
 import math
@@ -33,8 +34,11 @@ import agent as ag
 import websearch
 import catalog
 import cloud
+import rhimg
 import customwf
 import engine
+import nodepacks
+import extrafiles
 import errorhelp
 import llmapi
 import monitor
@@ -170,6 +174,9 @@ class Library:
         self.items = [x for x in self.items if x["id"] != item_id]
         self.save()
 
+
+RH_IMAGE = contextvars.ContextVar("rh_image", default=None)   # the RunningHub client while a picture request goes to the cloud
+IMAGE_TUNE_KEYS = ("cfg", "steps", "sampler", "scheduler", "shift", "refine")   # the picture settings of «Модели и LoRA»
 
 class App:
     def __init__(self, comfy_override=None):
@@ -1041,6 +1048,11 @@ class App:
                             ev = dict(ev, overall_done=base + ev["done"], overall_total=total, index=idx + 1, count=len(entries), label=label)
                         await emit(ev)
                     inst.emit = emit_overall
+                    if not dest.exists():
+                        have = await asyncio.to_thread(extrafiles.find_same, self.file_roots(p), dest.name, e["size"])
+                        if have:
+                            await emit({"state": "running", "label": f"{dest.name} у вас уже есть ({have.parent}), заново не скачиваю…"})
+                            await asyncio.to_thread(extrafiles.put, have, dest)
                     await inst.download(e["url"], dest, "models", label, e["size"])
                     base += e["size"]
                 await self.resolve_models()
@@ -1087,7 +1099,8 @@ class App:
                   "strength": ov.get(lkey(self.model_names.get(r))), "default": seen.get(lkey(self.model_names.get(r)))}
                  for r in catalog.MODE_ROLES.get(mode, []) + catalog.MODE_OPTIONAL.get(mode, []) if r.endswith("_lora") and r in self.model_names]
         custom = [{"file": x["file"], "strength": float(x.get("strength", 0.8)), "here": self.lora_here(x, mode)} for x in self.unique_loras()]
-        return web.json_response({"notes": [{"level": lv, "text": t} for lv, t in notes], "loras": loras, "custom": custom, "tune": (self.config.get("image_tune") or {}).get(mode) or {},
+        samplers, schedulers = await self.sampler_lists() if mode in ("krea", "flux", "qwen", "h3img") else ([], [])
+        return web.json_response({"samplers": samplers, "schedulers": schedulers, "notes": [{"level": lv, "text": t} for lv, t in notes], "loras": loras, "custom": custom, "tune": (self.config.get("image_tune") or {}).get(mode) or {},
                                   "picked": picked.get(role), "name": self.model_names.get(role)})
 
     async def h_models_pick(self, req):
@@ -1676,7 +1689,7 @@ class App:
 
             def run():
                 # an argument makes the .bat skip its final «pause» (otherwise it would wait for a key press forever)
-                p = subprocess.run(["cmd", "/c", "update_comfyui.bat", "nopause"], cwd=bat.parent, capture_output=True,
+                p = subprocess.run(["cmd", "/c", str(bat), "nopause"], cwd=bat.parent, capture_output=True,
                                    timeout=1200, creationflags=engine.CREATE_NO_WINDOW, env=engine.local_env(root))
                 return p.returncode, (p.stdout or b"").decode("cp866", "replace") + (p.stderr or b"").decode("cp866", "replace")
             try:
@@ -1769,7 +1782,8 @@ class App:
     async def h_rhlib_get(self, _req):
         c = self.config
         return web.json_response({"cards": rhlib.public(), "has_key": bool(c.get("rh_key")), "host": c.get("rh_host", "ai"),
-                                  "instance": c.get("rh_instance", "default"), "ids": c.get("rh_cards") or {},
+                                  "instance": c.get("rh_instance", "default"),
+                                  "ids": {k: v for k, v in (c.get("rh_cards") or {}).items() if v != rhlib.OLD_DEFAULTS.get(k)},
                                   "default_id": c.get("rh_workflow_id", "")})
 
     async def h_rhlib_run(self, req):
@@ -1944,7 +1958,7 @@ class App:
                 sfiles = dict(rfiles)
                 if files.get(f"svoice{one[2]}"):
                     sfiles["voice"] = files[f"svoice{one[2]}"]
-                if cid == "clip" and files.get("clipsong"):
+                if files.get("clipsong"):   # the clip, and the Video studio with the user's own track
                     sfiles["song"] = files["clipsong"]
                     sfiles["song_lead"] = float(form.get("clipsong_lead") or 0)
                 if studio_cont:
@@ -2133,6 +2147,9 @@ class App:
                         await self.send_stage(job, stage)
                 if status == "SUCCESS":
                     outs = await rh.outputs(job["task"]) or []
+                    if job.get("image"):
+                        await self.finish_rh_image(job, pid, outs)
+                        return
                     vids = [o for o in outs if str(o.get("fileType", "")).lower() in ("mp4", "webm", "mov", "mkv")
                             or str(o.get("fileUrl", "")).lower().split("?")[0].endswith((".mp4", ".webm", ".mov"))]
                     out_node = (job["meta"].get("rh") or {}).get("out")
@@ -2161,7 +2178,127 @@ class App:
         except Exception as e:
             if pid in self.jobs:
                 self.jobs.pop(pid, None)
-                await self.broadcast({"type": "error", "prompt_id": pid, "message": str(e)})
+                msg = str(e)
+                if job.get("image"):
+                    msg = rhimg.explain(msg, getattr(e, "node_errors", None), *job["image"])
+                await self.broadcast({"type": "error", "prompt_id": pid, "message": msg})
+
+    # ---------- pictures on RunningHub (the same graphs as on the own ComfyUI) ----------
+
+    def image_route(self, handler):
+        """A picture handler that works on RunningHub when the page asks for it (?cloud=1) or the whole program runs in the cloud."""
+        async def run(req):
+            rh = self.rh_client() if req.query.get("cloud") == "1" else self.rh()
+            if req.query.get("cloud") == "1" and not rh:
+                return web.json_response({"error": "Сначала вставьте API-ключ RunningHub и нажмите «Сохранить»"}, status=400)
+            token = RH_IMAGE.set(rh)
+            try:
+                return await handler(req)
+            finally:
+                RH_IMAGE.reset(token)
+        return run
+
+    def rh_default_names(self):
+        """{role: standard file name} of the chosen model variants."""
+        return {r: catalog.VARIANTS[r][v]["name"] for r, v in self.choice().items()}
+
+    async def queue_rh_image(self, rh, graph, stages, meta, titles):
+        key = rhimg.model_of(graph)
+        if not key:
+            return web.json_response({"error": "Эта функция пока работает только на своём ComfyUI."}, status=400)
+        wf_id = self.rh_image_ids()[key]
+        rhimg.default_names(graph, self.model_names, self.rh_default_names())
+        saved = None
+        try:
+            saved = await rh.workflow(wf_id)
+        except cloud.CloudError as e:
+            if wf_id != rhimg.DEFAULT_IDS[key]:   # the shipped workflow may not be readable with another account's key: the graph is sent anyway
+                return web.json_response({"error": f"Не получилось открыть workflow {wf_id} на RunningHub: {e}\nЧто делать: проверьте номер (цифры из адреса workflow), "
+                                                  "что workflow сохранён в вашем аккаунте и что ключ от этого же аккаунта."}, status=400)
+        if saved is not None:
+            rhimg.adapt(graph, saved)
+        try:
+            task = await rh.create(graph, wf_id, self.config.get("rh_instance", "default"))
+        except cloud.CloudError as e:
+            return web.json_response({"error": rhimg.explain(str(e), e.node_errors, graph, key, wf_id, saved)}, status=400)
+        pid = "rh-" + task
+        meta = dict(meta, cloud=True, sub=f'{meta.get("sub", "")} · RunningHub'.strip(" ·"))
+        self.jobs[pid] = {"prompt_id": pid, "state": "queued", "stages": {}, "stage": None, "meta": meta, "task": task,
+                          "titles": titles or {}, "image": (graph, key, wf_id, saved)}
+        asyncio.create_task(self.poll_cloud(rh, pid))
+        return web.json_response({"prompt_id": pid, "seed": meta["seed"]})
+
+    async def finish_rh_image(self, job, pid, outs):
+        """The pictures of a finished RunningHub task go to the library."""
+        ext = lambda o: (str(o.get("fileType") or "") or str(o.get("fileUrl", "")).split("?")[0].rsplit(".", 1)[-1]).lower()
+        pics = [o for o in outs if ext(o) in ("png", "jpg", "jpeg", "webp")][:12]
+        if not pics:
+            raise cloud.CloudError("RunningHub закончил работу, но не вернул картинку")
+        title = lambda o: str(job["titles"].get(str(o.get("nodeId")), ""))
+        pics.sort(key=lambda o: (0 if title(o).startswith("Лист") else 1, title(o)))
+        items = []
+        for i, o in enumerate(pics):
+            dest = DATA_DIR / "cloud" / f"{pid}_{i + 1}.{ext(o)}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            async with self.session.get(o["fileUrl"]) as r:
+                if r.status != 200:
+                    raise cloud.CloudError(f"Картинка готова, но не скачалась с RunningHub (HTTP {r.status}). Возьмите её на сайте в истории заданий.")
+                dest.write_bytes(await r.read())
+            item = dict(job["meta"], id=uuid.uuid4().hex[:12], prompt_id=pid, date=datetime.now().isoformat(timespec="seconds"), fav=False,
+                        kind="image", ext=ext(o), file={"type": "local", "path": str(dest), "filename": dest.name})
+            label = re.split(r"\s*[(\[]", title(o).split(":")[-1].strip())[0].strip()[:24]
+            if label:
+                item["label"] = label
+            self.library.add(item)
+            items.append(self.public(item))
+        self.jobs.pop(pid, None)
+        await self.broadcast({"type": "done", "prompt_id": pid, "item": items[0], "items": items})
+
+    def rh_image_ids(self):
+        return {**rhimg.DEFAULT_IDS, **{k: v for k, v in (self.config.get("rh_images") or {}).items() if v}}
+
+    async def h_rh_images(self, req):
+        """The page settings of pictures on RunningHub: the workflow number of each picture model and the GPU."""
+        if req.method == "POST":
+            b = await req.json()
+            if "model" in b:
+                key, wid = str(b.get("model")), str(b.get("id", "")).strip()
+                digits = re.search(r"\d{12,}", wid)   # the whole address of the workflow may be pasted
+                if key not in rhimg.MODELS or (wid and not digits):
+                    return web.json_response({"error": "Номер workflow: только цифры из его адреса"}, status=400)
+                ids = dict(self.config.get("rh_images") or {})
+                ids[key] = digits.group(0) if wid else ""
+                self.config.update(rh_images=ids)
+            if b.get("instance") in cloud.INSTANCE_TYPES:
+                self.config.update(rh_instance=b["instance"])
+        c = self.config
+        return web.json_response({"has_key": bool(c.get("rh_key")), "ids": self.rh_image_ids(), "instance": c.get("rh_instance", "default"),
+                                  "cloud_only": bool(self.rh())})
+
+    async def h_rh_images_check(self, req):
+        """«Проверить workflow»: reads the saved workflow (free) and compares its files with what the program sends."""
+        b = await req.json()
+        key, style = str(b.get("model")), b.get("style")
+        rh = self.rh_client()
+        if not rh:
+            return web.json_response({"error": "Сначала вставьте API-ключ RunningHub и нажмите «Сохранить»"}, status=400)
+        if key not in rhimg.MODELS:
+            return web.json_response({"error": "Такой модели нет"}, status=400)
+        wf_id = self.rh_image_ids()[key]
+        names = self.rh_default_names()
+        if key == "krea" and style == "real":
+            graph = wf.krea_real_graph(names, "x", 1024, 1024, 1, 1.5)[0]
+        else:
+            build = {"krea": wf.krea_graph, "flux": wf.flux_t2i_graph, "h3img": wf.h3img_t2i_graph,
+                     "qwen": lambda m, p, w, h, s: wf.qwen_t2i_graph(m, p, "", w, h, s)}[key]
+            graph = build(names, "x", 1024, 1024, 1)[0]
+        rhimg.default_names(graph, {}, {})
+        try:
+            saved = await rh.workflow(wf_id)
+        except cloud.CloudError as e:
+            return web.json_response({"error": f"Не получилось открыть workflow {wf_id}: {e}. Проверьте номер и ключ."}, status=400)
+        ok, lines = rhimg.check(graph, saved, key)
+        return web.json_response({"ok": ok, "lines": lines})
 
     async def read_form(self, req, file_fields, need_prompt=True, rh=None):
         form, files = {}, {}
@@ -2182,6 +2319,10 @@ class App:
 
     async def queue(self, graph, stages, meta, last_output=False, titles=None):
         scenes = stages.pop("__scenes__", None)   # which sampler is which scene (long video), for the progress text
+        if (meta or {}).get("mode") in ("krea", "qwen") and rhimg.model_of(graph):
+            meta = dict(meta, model=rhimg.model_of(graph))   # shown in the Library: which model drew the picture
+        if RH_IMAGE.get():
+            return await self.queue_rh_image(RH_IMAGE.get(), graph, stages, meta, titles)
         rh = self.rh()
         if rh:
             return await self.queue_cloud(rh, graph, stages, meta)
@@ -2232,6 +2373,10 @@ class App:
         return bool(m) and int(m.group(1)) == 0 and int(m.group(2)) < 45
 
     async def need_models(self, mode):
+        if RH_IMAGE.get():   # a picture for RunningHub: the models live there, this computer's ComfyUI is not asked about them
+            if not self.model_names:
+                await self.resolve_models()
+            return
         if mode == "h3img" and not self.rh() and await self.comfy_old():
             how = ("Откройте «Настройки», блок «Движок», и нажмите «Обновить ComfyUI»." if self.config.get("engine") == "managed"
                    else "Закройте программу и ComfyUI, откройте в папке ComfyUI папку update и запустите update_comfyui.bat (только его), затем запустите снова.")
@@ -2336,20 +2481,19 @@ class App:
 
     async def read_image_form(self, req):
         """Multipart form of the picture sections: text fields plus one optional file `image`."""
-        if self.rh():
-            raise web.HTTPBadRequest(text="Изображения работают только на своём ComfyUI (не в облаке RunningHub).")
         form, image, extra, mask, crop = {}, None, [], None, None
+        rh = RH_IMAGE.get()
         async for field in await req.multipart():
             if field.name == "image" and field.filename:
-                image = await self.upload_input(field)
+                image = await self.upload_input(field, rh)
             elif field.name == "mask" and field.filename:
-                mask = await self.upload_input(field)
+                mask = await self.upload_input(field, rh)
             elif field.name == "crop" and field.filename:
-                crop = await self.upload_input(field)
+                crop = await self.upload_input(field, rh)
             elif field.name == "orig" and field.filename:
-                form["_orig"] = await self.upload_input(field)
+                form["_orig"] = await self.upload_input(field, rh)
             elif field.name in ("image2", "image3", "image4", "image5") and field.filename:
-                extra.append(await self.upload_input(field))
+                extra.append(await self.upload_input(field, rh))
             else:
                 form[field.name] = await field.text()
         form["_extra"] = extra
@@ -2622,6 +2766,7 @@ class App:
             await self.need_models("kreareal")
             scale = wf.KREA_REAL_SCALES.get(form.get("scale", "2k"), 1.5)
             graph, stages = wf.krea_real_graph(self.model_names, prompt, width, height, seed, scale)
+            graph = self.tuned(graph, "krea")
             return await self.queue(graph, stages, {
                 "mode": "krea", "sub": "Изображение: реализм", "prompt": prompt, "aspect": aspect, "q": "4K" if scale > 2 else "2K",
                 "len": 0.0, "res": f"{int(width * scale)}×{int(height * scale)}", "seed": seed, **lab})
@@ -2641,6 +2786,7 @@ class App:
                 raise web.HTTPBadRequest(text="Загрузите изображение")
             mp = wf.QWEN_MP.get(form.get("size", "1"), 1.0)
             graph, stages = wf.qwen_edit_graph(self.model_names, wf.BG_REMOVE_PROMPT, image, mp, seed)
+            graph = self.tuned(graph, "qwen")
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Убрать фон", "prompt": "", "aspect": "",
                 "q": "", "len": 0.0, "res": "", "seed": seed})
@@ -2657,7 +2803,7 @@ class App:
             prompt = wf.OUTPAINT_PROMPT + (f" Scene: {user_text}" if user_text else "")
             lora = None
             try:
-                _, loras = await self.comfy_json("GET", "/models/loras", timeout=aiohttp.ClientTimeout(total=15))
+                _, loras = (200, []) if RH_IMAGE.get() else await self.comfy_json("GET", "/models/loras", timeout=aiohttp.ClientTimeout(total=15))
                 lora = next((f for f in (loras or []) if f.lower().endswith("qwen-image-2.1-outpaint-v2.safetensors")), None)
             except Exception:
                 pass
@@ -2667,6 +2813,7 @@ class App:
                 ow = oh = 0
             graph, stages = wf.qwen_outpaint_graph(self.model_names, prompt, image, form["_orig"], x, y, (w, h), seed, lora,
                                                    (ow, oh) if ow > 0 and oh > 0 else None)
+            graph = self.tuned(graph, "qwen")
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Расширение изображения", "prompt": prompt, "aspect": "",
                 "q": "", "len": 0.0, "res": f"{w}×{h}", "seed": seed})
@@ -2681,6 +2828,7 @@ class App:
             build = wf.h3img_frames_graph if h3 else wf.qwen_frames_graph if use_qwen else wf.flux_frames_graph
             graph, stages, titles = build(self.model_names, refs, frames, seed, size=(round_size(form, high=8192, max_px=H3IMG_MAX_PX) or wf.h3img_size("16:9", min(wf.H3IMG_MP.get(form.get("size", "8"), 8.0), 8.0))) if h3 else (round_size(form) or wf.FRAME_SIZE),   # a frame: up to 8 MP (9 frames of 16 MP would take an hour)
                                           line=form.get("line", "white"))
+            graph = self.tuned(graph, "h3img" if h3 else "qwen" if use_qwen else "flux")
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Раскадровка по кадрам", "prompt": form.get("prompt", "").strip(), "aspect": "",
                 "q": "", "len": 0.0, "res": "", "seed": seed}, titles=titles)
@@ -2698,6 +2846,7 @@ class App:
                 graph, stages = wf.flux_story_graph(self.model_names, refs, prompt, seed, sz)
             else:
                 graph, stages = wf.qwen_story_graph(self.model_names, refs, prompt, seed, sz)
+            graph = self.tuned(graph, "h3img" if h3 else "flux" if flux else "qwen")
             return await self.queue(graph, stages, {
                 "mode": "qwen", "sub": "Раскадровка по изображениям", "prompt": prompt, "aspect": "",
                 "q": "", "len": 0.0, "res": "%d×%d" % wf.STORY_SIZE, "seed": seed})
@@ -2730,6 +2879,7 @@ class App:
             graph, stages, prompt = (wf.h3img_sheet_graph if h3 else wf.qwen_sheet_graph)(
                 self.model_names, image, seed, headless=form.get("headless", "1") != "0",
                 background=form.get("background", "grey"), marks=form.get("marks", "")[:300], panels=panels, desc=form.get("prompt", "")[:1500], **kw)
+            graph = self.tuned(graph, "h3img" if h3 else "qwen")
             sub, res = "Лист персонажа", "%d×%d" % (wf.h3img_size("11:5" if panels == 6 else "16:9", sheet_mp) if h3 else (wf.SHEET6_SIZE if panels == 6 else wf.SHEET_SIZE))
             prompt = "Лист персонажа" + (" (6 панелей)" if panels == 6 else "") + (": " + (form.get("prompt", "").strip() or form.get("marks", "").strip())[:80] if (form.get("prompt", "").strip() or form.get("marks", "").strip()) else "")
         else:
@@ -2766,6 +2916,7 @@ class App:
             cw = ch = 0
         graph, stages = wf.qwen_inpaint_graph(self.model_names, prompt, image, form["_crop"], form["_mask"], x, y, mp, seed,
                                               (cw, ch) if cw > 0 and ch > 0 else None)
+        graph = self.tuned(graph, "qwen")
         return await self.queue(graph, stages, {
             "mode": "qwen", "sub": "Инпейнт", "prompt": prompt, "aspect": "",
             "q": "", "len": 0.0, "res": "", "seed": seed})
@@ -2840,7 +2991,7 @@ class App:
     def custom_loras(self, mode=None):
         """(file, strength) for the LoRAs the user added by hand on the Models screen (not used with the cloud).
         A LoRA can be switched off in single modes (right in the mode, in the «Модель» row): its `skip` lists those modes."""
-        if self.rh() or self.locked():   # «Я новичок»: only the LoRAs of the ready workflows
+        if self.rh() or RH_IMAGE.get() or self.locked():   # «Я новичок»: only the LoRAs of the ready workflows
             return []
         return [(x["file"], float(x["strength"])) for x in self.unique_loras() if self.lora_here(x, mode)]
 
@@ -2853,15 +3004,35 @@ class App:
         return bool(x.get("on", True)) and mode not in (x.get("skip") or [])
 
     def with_loras(self, graph, mode):
-        """A picture graph with the user's own LoRAs of this mode (krea / flux / qwen / h3img) and the user's own CFG / steps of that model."""
-        graph = wf.add_loras(graph, self.custom_loras(mode))
+        """A picture graph with the user's own LoRAs of this mode (krea / flux / qwen / h3img) and the user's own picture settings."""
+        return self.tuned(wf.add_loras(graph, self.custom_loras(mode)), mode)
+
+    def tuned(self, graph, mode):
+        """The user's own CFG, steps, sampler... of a picture model; nothing set = the recommended values of the graph."""
         t = (self.config.get("image_tune") or {}).get(mode) or {}
-        if not (self.rh() or self.locked()) and (t.get("cfg") is not None or t.get("steps") is not None):
-            wf.tune_sampling(graph, t.get("cfg"), t.get("steps"))
+        t = {k: v for k, v in t.items() if k in IMAGE_TUNE_KEYS and v not in (None, "")}
+        if mode not in ("krea", "qwen"):
+            t.pop("shift", None)
+        if t and not ((self.rh() and not RH_IMAGE.get()) or self.locked()):
+            wf.tune_sampling(graph, **t)
         return graph
 
+    async def sampler_lists(self):
+        """The samplers and schedulers this ComfyUI has."""
+        try:
+            _, info = await self.comfy_json("GET", "/object_info/KSampler", timeout=aiohttp.ClientTimeout(total=20))
+            req = info["KSampler"]["input"]["required"]
+            out = []
+            for key in ("sampler_name", "scheduler"):
+                spec = req[key]
+                out.append(list(spec[0]) if isinstance(spec[0], list) else list((spec[1] or {}).get("options") or []))
+            self._samplers = tuple(out)
+        except Exception:
+            pass
+        return getattr(self, "_samplers", ([], []))
+
     async def h_image_tune(self, req):
-        """CFG and steps of a picture model, set in the «Модели и LoRA» block; empty = as the program has it."""
+        """The picture settings of a model, set in the «Модели и LoRA» block; empty = the recommended value."""
         body = await req.json()
         mode = body.get("mode")
         if mode not in ("krea", "flux", "qwen", "h3img"):
@@ -2875,8 +3046,14 @@ class App:
             except (TypeError, ValueError):
                 return None
         tune = dict(self.config.get("image_tune") or {})
-        tune[mode] = {"cfg": num("cfg", 0.0, 20.0, float), "steps": num("steps", 1, 80, int)}
-        if tune[mode]["cfg"] is None and tune[mode]["steps"] is None:
+        names = {k: str(body.get(k) or "").strip() for k in ("sampler", "scheduler")}
+        for v in names.values():
+            if v and not re.fullmatch(r"[A-Za-z0-9_+\-.]{1,60}", v):
+                raise web.HTTPBadRequest(text="Неизвестный сэмплер или планировщик")
+        new = {"cfg": num("cfg", 0.0, 20.0, float), "steps": num("steps", 1, 80, int), "sampler": names["sampler"] or None,
+               "scheduler": names["scheduler"] or None, "shift": num("shift", 0.0, 20.0, float), "refine": num("refine", 0.05, 0.95, float)}
+        tune[mode] = {k: v for k, v in new.items() if v is not None}
+        if not tune[mode]:
             tune.pop(mode)
         self.config.update(image_tune=tune)
         return web.json_response({"ok": True, "tune": tune.get(mode) or {}})
@@ -3536,7 +3713,7 @@ class App:
             raise web.HTTPBadRequest(text="ffmpeg не найден")
         form, files, music_bytes, aud_files = await self._montage_form(req)
         try:
-            ids = [i for i in json.loads(form.get("ids") or "[]") if isinstance(i, str)][:30]
+            ids = [i for i in json.loads(form.get("ids") or "[]") if isinstance(i, str)]
             durs = json.loads(form.get("durs") or "[]")
             starts_raw = json.loads(form.get("starts") or "[]")
             mute = [bool(x) for x in json.loads(form.get("mute") or "[]")]
@@ -3671,7 +3848,7 @@ class App:
         """Join library clips in the given order with ComfyUI (no ffmpeg in the app)."""
         form, files, music_bytes, aud_files = await self._montage_form(req)
         try:
-            ids = [i for i in json.loads(form.get("ids") or "[]") if isinstance(i, str)][:30]
+            ids = [i for i in json.loads(form.get("ids") or "[]") if isinstance(i, str)]
         except ValueError:
             ids = []
         try:
@@ -3694,6 +3871,8 @@ class App:
                 items.append(self.library.get(i))
         if len(items) < 2 or any(not it or it.get("kind") == "image" for it in items):
             raise web.HTTPBadRequest(text="Добавьте хотя бы два видео")
+        if len(items) > 100:   # the join node of ComfyUI takes 100 videos at most
+            raise web.HTTPBadRequest(text=f"За один раз ComfyUI склеивает не больше 100 клипов, а на ленте {len(items)}. Склейте ролик двумя частями.")
         if self.rh():
             raise web.HTTPBadRequest(text="Монтаж работает только с локальным ComfyUI, не с облаком.")
         try:
@@ -3937,14 +4116,11 @@ class App:
         """Downloads the Save 3D node pack (s_tools) of one fixed, read-through version into custom_nodes. ComfyUI has to be restarted afterwards."""
         import zipfile
         import io
-        nd = self.dlss_nodes_dir()
+        nd = (await self.comfy_dirs(body.get("dir")))[1]
         if not nd:
-            raw = str(body.get("dir") or "").strip().strip('"')
-            base = Path(raw) if raw else None
-            nd = next((c for c in (base / "custom_nodes", base / "ComfyUI" / "custom_nodes") if c.is_dir()), None) if base else None
-            if not nd:
-                return web.json_response({"error": "Не нашла папку custom_nodes вашего ComfyUI. Укажите папку ComfyUI (где лежит custom_nodes)."}, status=400)
-            self.config.update(own_comfy_dir=str(nd.parent if nd.name == "custom_nodes" and (nd.parent / "main.py").is_file() else nd.parent.parent))
+            return web.json_response({"error": "Не нашла папку custom_nodes вашего ComfyUI. Укажите папку ComfyUI (где лежит custom_nodes)."}, status=400)
+        if self.config.get("engine") != "managed":
+            self.config.update(own_comfy_dir=str(nd.parent))
         target = nd / "s_tools"
         if target.exists():
             return web.json_response({"error": "Папка s_tools уже есть: " + str(target) + ". Перезапустите ComfyUI."}, status=409)
@@ -3986,73 +4162,372 @@ class App:
         d = str(raw or self.config.get("ext_models_dir") or "").strip().strip('"')
         return Path(d) if d else None
 
-    async def h_td_prepare(self, req):
-        """One button: the Save 3D nodes (when missing) and the model files of the chosen variant are fetched into the user's ComfyUI; the built-in ComfyUI is restarted
-        at the end when nodes were added. For the user's own ComfyUI the folder `models` is asked once."""
-        body = await req.json()
-        variant = body.get("variant") if body.get("variant") in ("triposplat", "trellis") else "triposplat"
-        if self.rh():
-            raise web.HTTPBadRequest(text="3D работает только с локальным ComfyUI.")
-        if getattr(self, "td_task", None) and not self.td_task.done():
-            raise web.HTTPConflict(text="Подготовка уже идёт. Дождитесь окончания.")
-        root = self.td_models_root(body.get("dir"))
-        if not root or not root.is_dir() or not any((root / sub).is_dir() for sub in ("diffusion_models", "vae", "clip_vision", "checkpoints")):
-            raise web.HTTPBadRequest(text="Не нашла папку models вашего ComfyUI. Укажите папку, где лежат diffusion_models, vae и clip_vision.")
-        if self.config.get("engine") != "managed":
-            self.config.update(ext_models_dir=str(root))
-        c = await self.td_check()
-        if not c["online"]:
-            raise web.HTTPBadGateway(text="ComfyUI не отвечает. Запустите его и повторите.")
-        v = c["variants"][variant]
-        need_nodes = any(n in ("SSave3D", "SMeshClay") for n in v["nodes"])
-        if need_nodes and not self.dlss_nodes_dir() and not body.get("nodes_dir"):
-            raise web.HTTPBadRequest(text="Не нашла папку custom_nodes. Укажите папку ComfyUI (где лежит custom_nodes).")
+    MODEL_SUBS = ("diffusion_models", "vae", "clip_vision", "checkpoints", "text_encoders", "loras")
+
+    async def comfy_dirs(self, raw=""):
+        """(models, custom_nodes) of the ComfyUI in use, None for what is not known. The user's own ComfyUI: the folder they chose (the ComfyUI
+        folder, the portable folder or `models` itself), what was chosen before, else the folder of the ComfyUI that is running now."""
+        if self.config.get("engine") == "managed":
+            root = self.comfy_root()
+            return (root / "ComfyUI" / "models", root / "ComfyUI" / "custom_nodes") if root else (None, None)
+        is_models = lambda p: p.is_dir() and any((p / x).is_dir() for x in self.MODEL_SUBS)
+        raw = str(raw or "").strip().strip('"')
+        bases = [Path(raw)] if raw else []
+        if raw and Path(raw).name.lower() in ("models", "custom_nodes"):
+            bases.append(Path(raw).parent)
+        models = next((c for b in bases for c in (b, b / "models", b / "ComfyUI" / "models") if is_models(c)), None)
+        nodes = next((c for b in bases for c in (b / "custom_nodes", b / "ComfyUI" / "custom_nodes") if c.is_dir()), None)
+        saved = str(self.config.get("ext_models_dir") or "").strip().strip('"')
+        if not models and saved and is_models(Path(saved)):
+            models = Path(saved)
+        nodes = nodes or self.dlss_nodes_dir()
+        if not models or not nodes:
+            py = await self.running_comfy_python()
+            base = py.parent.parent / "ComfyUI" if py else None
+            if base and base.is_dir():
+                models = models or (base / "models" if is_models(base / "models") else None)
+                nodes = nodes or (base / "custom_nodes" if (base / "custom_nodes").is_dir() else None)
+        if not models and nodes and is_models(nodes.parent / "models"):
+            models = nodes.parent / "models"
+        return models, nodes
+
+    def file_roots(self, models=None):
+        """The folders where an already downloaded model file is looked for: [(folder, kind, depth)]."""
+        roots = []
+        if models:
+            roots.append((Path(models), "models", 8))
+        for key, tail in (("ext_models_dir", ()), ("models_dir", ()), ("own_comfy_dir", ("ComfyUI", "models")), ("own_comfy_dir", ("models",))):
+            raw = str(self.config.get(key) or "").strip().strip('"')
+            if raw:
+                roots.append((Path(raw, *tail), "models", 8))
+        if self.config.get("install_dir"):
+            roots.append((Path(self.config.get("install_dir")) / catalog.COMFY_DIRNAME / "ComfyUI" / "models", "models", 8))
+        roots += [(Path.home() / "Downloads", "downloads", 2), (Path.home() / "Desktop", "downloads", 2)]
+        return roots
+
+    async def lora_folders(self, models):
+        """Every folder this ComfyUI really reads LoRAs from (asked from ComfyUI itself, extra_model_paths.yaml included)."""
+        out = []
+        try:
+            status, kinds = await self.comfy_json("GET", "/experiment/models", timeout=aiohttp.ClientTimeout(total=15))
+            if status == 200:
+                out = [Path(f) for k in kinds or [] if k.get("name") == "loras" for f in k.get("folders") or []]
+        except Exception:
+            pass
+        if not out and models:
+            out = [Path(models) / "loras"]
+        return [p for p in out if p.is_dir()]
+
+    async def extra_state(self, key, raw=""):
+        """What is known about an additional file: does ComfyUI see it, where are copies of it, where it can be put."""
+        info = extrafiles.FILES[key]
+        try:
+            status, la = await self.comfy_json("GET", "/models/loras", timeout=aiohttp.ClientTimeout(total=15))
+            names = la if status == 200 and isinstance(la, list) else None
+        except Exception:
+            names = None
+        if key == "draft":
+            seen = [n for n in names or [] if re.search(r"dmad[_\-\s]?4[_\-\s]?step", n, re.I)]
+        else:
+            seen = [n for n in names or [] if catalog.is_action_dmad(n)]
         managed = self.config.get("engine") == "managed"
-        lost = list(v["models"])
+        models = (await self.comfy_dirs(""))[0]
+        dirs = await self.lora_folders(models)
+        if managed and models:
+            dirs = [models / "loras"]
+        counts = await asyncio.to_thread(extrafiles.count, dirs)
+        best = dirs[counts.index(max(counts))] if dirs else None   # where the user already keeps LoRAs
+        roots = [(d, "models", 6) for d in dirs] + self.file_roots(models)
+        found = await asyncio.to_thread(extrafiles.find, key, roots)
+        chosen = "" if managed else raw
+        folder = extrafiles.folder_for(chosen, dirs) if chosen else (best / "MinimaxH3" if best else None)
+        return {"online": names is not None, "seen": seen, "found": found, "name": info["name"], "size": info["size"], "download": bool(info["url"]),
+                "managed": managed, "target": str(folder / info["name"]) if folder else "", "folder": str(folder) if folder else "",
+                "dirs": [{"path": str(d), "put": str(d / "MinimaxH3"), "count": n, "best": d == best} for d, n in zip(dirs, counts)]}
+
+    async def h_extra_file(self, req):
+        key = req.query.get("key")
+        if key not in extrafiles.FILES:
+            raise web.HTTPBadRequest(text="Неизвестный файл")
+        return web.json_response(await self.extra_state(key, str(req.query.get("dir") or "").strip()))
+
+    async def h_extra_file_do(self, req):
+        """«Скачать» or «Поставить в нужную папку» of an additional file. A file that is already on the computer is never downloaded again."""
+        body = await req.json()
+        key, action = body.get("key"), body.get("action")
+        if key not in extrafiles.FILES or action not in ("download", "place"):
+            raise web.HTTPBadRequest(text="Неизвестный файл")
+        raw = str(body.get("dir") or "").strip().strip('"')
+        d = await self.extra_state(key, raw)
+        if d["seen"]:
+            return web.json_response({"ok": True, "state": "seen", "text": "Этот файл уже есть, ComfyUI его видит: " + d["seen"][0]})
+        if not d["target"]:
+            return web.json_response({"need_dir": True, "error": "Нажмите «Другая папка» и выберите папку loras вашего ComfyUI."}, status=400)
+        if action == "download" and not d["found"]:
+            info = extrafiles.FILES[key]
+            if not info["url"]:
+                raise web.HTTPBadRequest(text="Этот файл скачивается только в браузере: нажмите «Открыть страницу скачивания».")
+            files = [{"file": info["name"], "dest": d["target"], "url": info["url"], "size": info["size"]}]
+            return await self.start_prepare("extra", "", files)
+        if not d["found"]:
+            raise web.HTTPNotFound(text="Не нашла этот файл ни в папках моделей, ни в «Загрузках», ни на рабочем столе. "
+                                        "Если он скачивается, дождитесь окончания и нажмите ещё раз.")
+        folders = [Path(x["path"]) for x in d["dirs"]]
+        inside = None if raw else next((f for f in d["found"] if any(x in Path(f["path"]).parents for x in folders)), None)
+        if inside:
+            path, how = Path(inside["path"]), "there"
+        else:
+            src = d["found"][0]
+            path = Path(d["target"])
+            if src["size"] < extrafiles.FILES[key]["size"] * 0.995:   # a smaller variant keeps its own name
+                path = path.with_name(extrafiles.clean_name(Path(src["path"]).name))
+            if src["kind"] == "downloads" and not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(shutil.move, src["path"], str(path))
+                how = "move"
+            else:
+                how = await asyncio.to_thread(extrafiles.put, src["path"], path)
+        after = await self.extra_state(key, raw)
+        done = {"move": "Файл перенесён сюда", "link": "Файл подключён сюда (место на диске не занимает)", "copy": "Файл скопирован сюда",
+                "there": "Файл уже лежит здесь"}[how]
+        text = f"{done}: {path}. " + ("ComfyUI его видит." if after["seen"] else
+                                      "ComfyUI его пока не видит: перезапустите ComfyUI. Если не поможет, ComfyUI не читает эту папку: выберите другую из списка.")
+        return web.json_response({"ok": True, "state": "seen" if after["seen"] else "placed", "path": str(path), "text": text})
+
+    async def start_prepare(self, page, raw, files, node_step=None):
+        """Fetches the missing files of a page into the user's ComfyUI. files: dicts url, file, sub (folder in models), folder (subfolder inside it), size.
+        node_step(custom_nodes) puts the missing nodes there; the built-in ComfyUI is then restarted, the user's own one the user restarts."""
+        if self.rh():
+            raise web.HTTPBadRequest(text="Это работает только с локальным ComfyUI.")
+        if (getattr(self, "td_task", None) and not self.td_task.done()) or self.installer or getattr(self, "comfy_updating", False):
+            raise web.HTTPConflict(text="Установка или обновление уже идёт. Дождитесь окончания.")
+        if node_step and await self.comfy_busy():
+            raise web.HTTPConflict(text="В ComfyUI сейчас идёт генерация. Дождитесь конца и нажмите ещё раз.")
+        managed = self.config.get("engine") == "managed"
+        models, nodes = await self.comfy_dirs(raw)
+        ask = "Нужно один раз показать папку вашего ComfyUI (в ней лежат папки models и custom_nodes)."
+        own_dest = bool(files) and all(m.get("dest") for m in files)   # the page chose the exact place itself
+        if (files and not own_dest and (not models or not models.is_dir())) or (node_step and not nodes):
+            return web.json_response({"need_dir": True, "error": ("В этой папке не нашлись models и custom_nodes. " if raw else "") + ask}, status=400)
+        if not managed:
+            if files and not own_dest:
+                self.config.update(ext_models_dir=str(models))
+            if nodes:
+                self.config.update(own_comfy_dir=str(nodes.parent))
+        total = sum(m["size"] for m in files)
+        if files:
+            where = Path(files[0]["dest"]) if own_dest else models
+            free = shutil.disk_usage(next(p for p in (where, *where.parents) if p.is_dir())).free
+            if free < total + 2 * 1024 ** 3:
+                gb = lambda n: f"{n / 1024 ** 3:.1f}".replace(".", ",")
+                raise web.HTTPBadRequest(text=f"На диске с папкой {where} мало места: нужно {gb(total)} ГБ и небольшой запас, свободно {gb(free)} ГБ.")
         inst = engine.Installer(ROOT, self.session, None)
         self.td_installer = inst
 
         async def emit(ev):
-            await self.broadcast({"type": "td_dl", "state": ev.get("state"), "label": ev.get("label"), "done": ev.get("overall_done"), "total": ev.get("overall_total"),
-                                  "index": ev.get("index"), "count": ev.get("count")})
+            await self.broadcast({"type": "td_dl", "page": page, "state": ev.get("state"), "label": ev.get("label"), "done": ev.get("overall_done"),
+                                  "total": ev.get("overall_total"), "index": ev.get("index"), "count": ev.get("count"), "restart": ev.get("restart")})
+
+        async def restart():
+            await emit({"state": "running", "label": "Запускаю ComfyUI снова, чтобы он увидел новые ноды…"})
+            self.start_managed()
+            await self.watch_start()
 
         async def run():
+            stopped, note = False, ""
             try:
-                restart = False
-                if need_nodes:
-                    await emit({"state": "running", "label": "Ставлю ноды сохранения 3D (s_tools)…"})
-                    resp = await self.td_install_core({"dir": body.get("nodes_dir") or ""})
-                    if resp.status >= 400 and resp.status != 409:
-                        raise RuntimeError(json.loads(resp.text).get("error", "не удалось поставить ноды"))
-                    restart = True
-                total = sum(m["size"] for m in lost)
+                if node_step:
+                    if managed and self.process:   # libraries cannot be replaced while ComfyUI holds them
+                        await emit({"state": "running", "label": "Останавливаю ComfyUI на время установки…"})
+                        stopped = True
+                        await asyncio.to_thread(self.process.stop)
+                    await emit({"state": "running", "label": "Ставлю нужные ноды…"})
+                    note = await node_step(nodes, emit) or ""
                 base = 0
-                for i, m in enumerate(lost):
-                    dest = root / m["sub"] / "3D" / m["file"]
+                for i, m in enumerate(files):
+                    dest = Path(m["dest"]) if m.get("dest") else models / m["sub"] / m.get("folder", "") / m["file"]
 
                     async def emit_overall(ev, base=base, idx=i, label=m["file"]):
                         if ev.get("done") is not None:
-                            await emit({"state": "running", "overall_done": base + ev["done"], "overall_total": total, "index": idx + 1, "count": len(lost), "label": label})
+                            await emit({"state": "running", "overall_done": base + ev["done"], "overall_total": total, "index": idx + 1, "count": len(files), "label": label})
                     inst.emit = emit_overall
+                    if not dest.exists():
+                        have = await asyncio.to_thread(extrafiles.find_same, self.file_roots(models), m["file"], m["size"])
+                        if have:
+                            await emit({"state": "running", "label": f"{m['file']} у вас уже есть ({have.parent}), заново не скачиваю…"})
+                            await asyncio.to_thread(extrafiles.put, have, dest)
                     await inst.download(m["url"], dest, "td", m["file"], m["size"])
                     base += m["size"]
-                if restart and managed:
-                    await emit({"state": "running", "label": "Перезапускаю ComfyUI, чтобы он увидел новые ноды…"})
-                    if self.process:
-                        await asyncio.to_thread(self.process.stop)
-                    self.start_managed()
-                    await self.watch_start()
-                    await emit({"state": "done", "label": "Готово: всё скачано и установлено. Можно создавать модель."})
-                elif restart:
-                    await emit({"state": "done", "label": "Файлы скачаны, ноды установлены. Перезапустите ваш ComfyUI и нажмите «Проверить снова»."})
+                if node_step and managed:
+                    stopped = False
+                    await restart()
+                    await emit({"state": "done", "label": ("Готово: скачано и установлено. " + note).strip()})
+                elif node_step:
+                    await emit({"state": "done", "restart": True, "label": ("Установлено. Остался один шаг: закройте ваш ComfyUI, запустите его снова и нажмите «Проверить снова». " + note).strip()})
                 else:
-                    await emit({"state": "done", "label": "Готово: файлы скачаны. Нажмите «Проверить снова»."})
+                    await emit({"state": "done", "label": "Готово: скачано."})
             except engine.Cancelled:
                 await emit({"state": "error", "label": "Скачивание остановлено. Скачанное сохранено: нажмите кнопку снова, и оно продолжится."})
             except Exception as ex:
-                await emit({"state": "error", "label": str(ex)[:300]})
+                self.note_error(f"Установка ({page}): {ex}"[:600])
+                await emit({"state": "error", "label": str(ex)[:600]})
+            finally:
+                if stopped:   # the install failed or was stopped: ComfyUI must not stay switched off
+                    try:
+                        self.start_managed()
+                        await self.watch_start()
+                    except Exception as ex:
+                        print(f"ComfyUI restart after install: {type(ex).__name__}: {ex}", file=sys.stderr)
         self.td_task = asyncio.create_task(run())
-        return web.json_response({"ok": True, "count": len(lost), "size": sum(m["size"] for m in lost), "nodes": need_nodes})
+        return web.json_response({"ok": True, "count": len(files), "size": total, "nodes": bool(node_step)})
+
+    async def h_td_prepare(self, req):
+        """One button: the Save 3D nodes (when missing) and the model files of the chosen variant."""
+        body = await req.json()
+        variant = body.get("variant") if body.get("variant") in ("triposplat", "trellis") else "triposplat"
+        c = await self.td_check()
+        if not c["online"]:
+            raise web.HTTPBadGateway(text="ComfyUI не отвечает. Запустите его и повторите.")
+        v = c["variants"][variant]
+
+        save_nodes = self.td_save_nodes
+        need_nodes = any(n in ("SSave3D", "SMeshClay") for n in v["nodes"])
+        files = [dict(m, folder="3D") for m in v["models"]]
+        return await self.start_prepare("td", body.get("dir"), files, save_nodes if need_nodes else None)
+
+    async def td_save_nodes(self, nodes, _emit=None):
+        if (nodes / "s_tools").exists():
+            return
+        resp = await self.td_install_core({"dir": str(nodes.parent)})
+        if resp.status >= 400 and resp.status != 409:
+            raise RuntimeError(json.loads(resp.text).get("error", "не удалось поставить ноды"))
+
+    async def comfy_busy(self):
+        try:
+            status, q = await self.comfy_json("GET", "/queue", timeout=aiohttp.ClientTimeout(total=10))
+        except Exception:
+            return False
+        return status == 200 and isinstance(q, dict) and bool(q.get("queue_running") or q.get("queue_pending"))
+
+    async def comfy_python(self, nodes):
+        """(python.exe, environment) of the ComfyUI that owns custom_nodes, to install libraries into it."""
+        if self.config.get("engine") == "managed":
+            root = self.comfy_root()
+            return (root / "python_embeded" / "python.exe", engine.local_env(root)) if root else (None, None)
+        env = {k: v for k, v in os.environ.items() if k.upper() not in ("PYTHONHOME", "PYTHONPATH")}
+        py = nodepacks.python_near(nodes) or await self.running_comfy_python()
+        if not py:
+            saved = Path(str(self.config.get("own_comfy_python") or ""))
+            py = saved if saved.name.lower() == "python.exe" and saved.is_file() else None
+        elif str(py) != self.config.get("own_comfy_python"):
+            self.config.update(own_comfy_python=str(py))
+        return py, env
+
+    def pack_step(self, keys):
+        """The node_step of start_prepare: the program's own nodes («own») and the outside packs."""
+        async def step(nodes_dir, emit):
+            notes = []
+            if "own" in keys:
+                await asyncio.to_thread(self.icons_copy_nodes, nodes_dir)
+            for key in (k for k in keys if k in nodepacks.PACKS):
+                py, env = await self.comfy_python(nodes_dir)
+
+                async def progress(label, done=None, total=None):
+                    if self.td_installer.cancelled:
+                        raise engine.Cancelled()
+                    if done is not None and total:
+                        label = f"{label}: {done / 1048576:.0f} из {total / 1048576:.0f} МБ"
+                    await emit({"state": "running", "label": label})
+                note = await nodepacks.install(key, nodes_dir, py, self.td_installer, env, progress)
+                if note:
+                    notes.append(note)
+            return " ".join(notes)
+        return step
+
+    async def h_prepare_item(self, req):
+        """The «Скачать» button of ONE missing thing of a page: a node pack, the program's nodes, or model files."""
+        body = await req.json()
+        page = body.get("page") if body.get("page") in ("icons", "td") else "icons"
+        item = str(body.get("item") or "")
+        raw = str(body.get("dir") or "").strip().strip('"')
+        files, step = [], None
+        if page == "icons" and (item == "own" or item in nodepacks.PACKS):
+            step = self.pack_step([item])
+        elif page == "td" and item == "stools":
+            step = self.td_save_nodes
+        elif page == "icons" and item == "rmbgmodel":
+            files = self.rmbg_model_files((await self.comfy_dirs(raw))[0])
+        elif item.startswith("file:"):
+            if page == "icons":
+                files = [f for _g, _c, _f, f in self.icon_files() if f["file"] == item[5:]]
+            else:
+                c = await self.td_check()
+                files = [dict(m, folder="3D") for v in c["variants"].values() for m in v["models"] if m["file"] == item[5:]][:1]
+        if not step and not files:
+            raise web.HTTPBadRequest(text="Это уже установлено. Нажмите «Проверить снова».")
+        if raw and self.config.get("engine") != "managed":   # the folder the user chose must really be the one that gets used
+            models, nodes = await self.comfy_dirs(raw)
+            target, chosen = (nodes if step else models), Path(raw)
+            if not target or not (target == chosen or chosen in target.parents):
+                what = "папка custom_nodes" if step else "папка models (в ней должны быть папки вроде vae, loras, diffusion_models)"
+                return web.json_response({"need_dir": True, "error": f"В выбранном месте не нашлась {what}. Выберите её или папку ComfyUI."}, status=400)
+        return await self.start_prepare(page, raw, files, step)
+
+    def rmbg_model_files(self, models):
+        """Model files of the RMBG node that are not in <models>/RMBG/RMBG-2.0 yet (the node also fetches them itself on first use)."""
+        if not models:
+            return []
+        out = []
+        for name, size in (("config.json", 1000), ("BiRefNet_config.py", 1000), ("birefnet.py", 90000), ("model.safetensors", 884878856)):
+            if not (models / "RMBG" / "RMBG-2.0" / name).is_file():
+                out.append({"file": name, "sub": "RMBG", "folder": "RMBG-2.0", "size": size,
+                            "url": "https://huggingface.co/1038lab/RMBG-2.0/resolve/main/" + name})
+        return out
+
+    async def h_comfy_update_own(self, req):
+        """«Обновить ComfyUI» on a page card. The built-in one: the usual update. The user's own portable ComfyUI: its own
+        update_comfyui.bat, only while that ComfyUI is closed."""
+        if self.config.get("engine") == "managed":
+            return await self.h_comfy_update(req)
+        body = await req.json()
+        if self.installer or getattr(self, "comfy_updating", False) or (getattr(self, "td_task", None) and not self.td_task.done()):
+            return web.json_response({"error": "Сейчас идёт установка или обновление. Дождитесь конца."}, status=409)
+        py = await self.running_comfy_python()
+        if py:
+            self.config.update(own_comfy_python=str(py))
+        raw = str(body.get("dir") or "").strip().strip('"')
+        saved_py = str(self.config.get("own_comfy_python") or "")
+        own = str(self.config.get("own_comfy_dir") or "")
+        if raw:
+            bases = [Path(raw), Path(raw).parent]
+        else:
+            bases = ([Path(saved_py).parent.parent] if saved_py else []) + ([Path(own), Path(own).parent] if own else [])
+        root = next((b for b in bases if (b / "update" / "update_comfyui.bat").is_file() and (b / "python_embeded" / "python.exe").is_file()), None)
+        if not root:
+            return web.json_response({"need_dir": True, "error": "Не нашла файл обновления. Выберите папку вашего ComfyUI_windows_portable (в ней лежат папки update и python_embeded)."}, status=400)
+        try:
+            status, _ = await self.comfy_json("GET", "/system_stats", timeout=aiohttp.ClientTimeout(total=6))
+        except Exception:
+            status = 0
+        if status == 200:
+            return web.json_response({"error": f"Сначала закройте ваш ComfyUI (чёрное окно), потом нажмите «Обновить ComfyUI» ещё раз. Будет обновлён ComfyUI в папке {root}"}, status=409)
+        self.comfy_updating = True
+        try:
+            def run():
+                env = {k: v for k, v in os.environ.items() if k.upper() not in ("PYTHONHOME", "PYTHONPATH")}
+                p = subprocess.run(["cmd", "/c", str(root / "update" / "update_comfyui.bat"), "nopause"], cwd=root / "update", capture_output=True, stdin=subprocess.DEVNULL,
+                                   timeout=1200, creationflags=engine.CREATE_NO_WINDOW, env=env)
+                return p.returncode, (p.stdout or b"").decode("cp866", "replace") + (p.stderr or b"").decode("cp866", "replace")
+            try:
+                code, out = await asyncio.to_thread(run)
+            except Exception as e:
+                code, out = -1, f"{type(e).__name__}: {e}"
+        finally:
+            self.comfy_updating = False
+        if code != 0:
+            self.note_error("Обновление своего ComfyUI: " + out[-400:])
+            return web.json_response({"error": "Обновление не получилось: " + out[-300:]}, status=500)
+        return web.json_response({"ok": True, "own": True, "dir": str(root)})
 
     async def h_td_prepare_cancel(self, _req):
         inst = getattr(self, "td_installer", None)
@@ -4208,10 +4683,13 @@ class App:
     ICONS_DIR = "Анимированные иконки"
     ICON_NODE_FILES = ("loop_cleanup.py", "telegram_sticker_webm.py")   # the program's own two nodes: they are copied into custom_nodes
 
+    ICON_OWN = ("LoopCleanup", "TelegramStickerWebM")
+
     async def icons_nodes(self):
         """True / False for each node the page needs; None when ComfyUI does not answer."""
         out = {}
-        for cls in ("RMBG", "MatAnyone2", "LoopCleanup", "TelegramStickerWebM", "ImageBlur", "GrowMask", "JoinImageWithAlpha", "LoadVideo"):
+        for cls in ("RMBG", "MatAnyone2", "LoopCleanup", "TelegramStickerWebM", "ImageBlur", "GrowMask",
+                    "JoinImageWithAlpha", "LoadVideo", "MiniMaxH3ImageToVideo"):
             try:
                 status, d = await self.comfy_json("GET", f"/object_info/{cls}", timeout=aiohttp.ClientTimeout(total=15))
                 out[cls] = status == 200 and isinstance(d, dict) and cls in d
@@ -4219,40 +4697,74 @@ class App:
                 out[cls] = None
         return out
 
-    async def h_icons_info(self, _req):
+    def icon_files(self):
+        """The model files of «picture -> video» on this page: (group, loader node, its field, description)."""
+        hf = "https://huggingface.co/{}/resolve/main/{}"
+        out = [("video", "UNETLoader", "unet_name", {"file": wf.ICON_UNET, "sub": "diffusion_models", "folder": "MinimaxH3",
+                "url": hf.format("Comfy-Org/MiniMax-H3", "diffusion_models/" + wf.ICON_UNET), "size": 20970379616, "what": "видео из картинки"}),
+               ("video", "LoraLoaderModelOnly", "lora_name", {"file": wf.ICON_LORA, "sub": "loras", "folder": "MinimaxH3",
+                "url": hf.format("lightx2v/Minimax-h3-Turbo", wf.ICON_LORA), "size": 1956193000, "what": "ускоритель"})]
+        for role, cls, field, what in (("text_encoder", "CLIPLoader", "clip_name", "понимание текста"), ("video_vae", "VAELoader", "vae_name", "картинка видео"),
+                                       ("audio_vae", "VAELoader", "vae_name", "звук видео")):
+            m = next(iter(catalog.VARIANTS[role].values()))
+            out.append(("video", cls, field, {"file": m["file"], "sub": m["category"], "folder": "MinimaxH3", "url": m["url"], "size": m["size"], "what": what}))
+        return out
+
+    async def icons_check(self):
         nodes = await self.icons_nodes()
-        return web.json_response({"nodes": nodes, "comfy": all(v is not None for v in nodes.values()), "local": not self.rh(),
+        online = all(v is not None for v in nodes.values())
+        files, choices = [], {}
+        if online:
+            for group, cls, field, f in self.icon_files():
+                if (cls, field) not in choices:
+                    choices[(cls, field)] = await self.comfy_choices(cls, field, strict=True)
+                have = choices[(cls, field)]
+                found = next((n for n in (have or []) if n.replace(chr(92), "/").split("/")[-1].lower() == f["file"].lower()), "")
+                files.append(dict(f, group=group, found=found, missing=have is not None and not found))
+        return nodes, online, files
+
+    async def h_icons_info(self, _req):
+        nodes, online, files = await self.icons_check()
+        md, nd = (None, None) if self.rh() else await self.comfy_dirs()
+        py = (await self.comfy_python(nd))[0] if nd else None
+        managed = self.config.get("engine") == "managed"
+        packs = {}
+        for key, p in nodepacks.PACKS.items():
+            folder = nodepacks.find_pack(nd, key) if nd else None
+            lost = [w["file"] for w in p["weights"] if folder and not (folder / w["sub"] / w["file"]).is_file()]
+            packs[key] = {"loaded": bool(nodes.get(p["cls"])), "folder": str(folder) if folder else "", "weights": lost}
+        rmbg_model = self.rmbg_model_files(md) if managed else []
+        return web.json_response({"packs": packs, "rmbg_model": sum(f["size"] for f in rmbg_model), "models_dir": str(md) if md else "",
+                                  "nodes_dir": str(nd) if nd else "", "python": str(py) if py else "", "nodes": nodes, "comfy": online, "local": not self.rh(), "files": files, "managed": self.config.get("engine") == "managed",
                                   "dir": self.config.get("results_dir") or str(self.default_results_dir())})
 
-    async def h_icons_install(self, req):
-        """Copies the program's own nodes (LoopCleanup and TelegramStickerWebM) into custom_nodes of the ComfyUI in use.
-        ComfyUI has to be restarted afterwards: it reads custom_nodes only at start."""
-        try:
-            body = await req.json()
-        except Exception:
-            body = {}
-        nodes_dir = self.dlss_nodes_dir()
-        if not nodes_dir and not body.get("dir"):
-            auto_py = await self.running_comfy_python()
-            cand = auto_py.parent.parent / "ComfyUI" / "custom_nodes" if auto_py else None
-            if cand and cand.is_dir():
-                nodes_dir = cand
-                self.config.update(own_comfy_dir=str(auto_py.parent.parent))
-        if not nodes_dir:
-            raw = str(body.get("dir") or self.config.get("own_comfy_dir") or "").strip().strip('"')
-            base = Path(raw) if raw else None
-            nodes_dir = next((c for c in (base / "custom_nodes", base / "ComfyUI" / "custom_nodes") if c.is_dir()), None) if base else None
-            if not nodes_dir:
-                return web.json_response({"error": "Не нашла папку custom_nodes вашего ComfyUI. Укажите папку ComfyUI (где лежит custom_nodes)."}, status=400)
-            self.config.update(own_comfy_dir=raw)
-        copied = []
+    def icons_copy_nodes(self, nodes_dir):
+        """The program's own nodes (LoopCleanup and TelegramStickerWebM) go into custom_nodes."""
         for fn in self.ICON_NODE_FILES:
             src = ROOT / "icon_nodes" / fn
             if not src.is_file():
-                return web.json_response({"error": f"В программе нет файла {fn}."}, status=500)
+                raise RuntimeError(f"В программе нет файла {fn}.")
             shutil.copyfile(src, nodes_dir / fn)
-            copied.append(fn)
-        return web.json_response({"ok": True, "dir": str(nodes_dir), "files": copied})
+
+    async def h_icons_prepare(self, req):
+        """One button: the program's nodes and every model file the chosen source needs."""
+        body = await req.json()
+        nodes, online, files = await self.icons_check()
+        if not online:
+            raise web.HTTPBadGateway(text="ComfyUI не отвечает. Запустите его и повторите.")
+        groups = {"video"} if body.get("src") != "video" else set()
+        lost = [f for f in files if f["missing"] and f["group"] in groups]
+        keys = ["own"] if any(not nodes.get(c) for c in self.ICON_OWN) else []
+        md, nd = await self.comfy_dirs(body.get("dir"))
+        for key, p in nodepacks.PACKS.items():
+            folder = nodepacks.find_pack(nd, key) if nd else None
+            if not nodes.get(p["cls"]) or (folder and any(not (folder / w["sub"] / w["file"]).is_file() for w in p["weights"])):
+                keys.append(key)
+        if self.config.get("engine") == "managed":
+            lost += self.rmbg_model_files(md)
+        if not lost and not keys:
+            raise web.HTTPBadRequest(text="Всё нужное уже установлено.")
+        return await self.start_prepare("icons", body.get("dir"), lost, self.pack_step(keys) if keys else None)
 
     async def h_icons_open(self, req):
         body = await req.json()
@@ -4440,6 +4952,10 @@ class App:
             raise web.HTTPBadGateway(text="Не удалось передать файл в ComfyUI")
         o["image" if mode == "image" else "video"] = res["name"]
         graph, stages, need = wf.icons_api_graph(base, o)
+        for n in graph.values():   # the saved graph pins video-encoder options ('none' is not accepted by every ComfyUI): leave them out, the node uses its own defaults
+            if n.get("class_type") == "CreateVideo":
+                for k in ("bit_depth", "color_space", "chroma_subsampling", "codec"):
+                    n["inputs"].pop(k, None)
         # every node and every model file of the graph must exist in ComfyUI: say which one is missing instead of a long ComfyUI error
         classes = sorted({graph[i]["class_type"] for i in need})
         missing = []
@@ -4451,8 +4967,8 @@ class App:
             if st != 200 or not data or cls not in data:
                 missing.append(cls)
         if missing:
-            hints = {"RMBG": "ComfyUI-RMBG", "MatAnyone2": "ComfyUI-MatAnyone (FuouM)", "LoopCleanup": "кнопка «Установить ноды» на странице",
-                     "TelegramStickerWebM": "кнопка «Установить ноды» на странице", "GLSLShader": "обновите ComfyUI", "ComfySwitchNode": "обновите ComfyUI"}
+            hints = {"RMBG": "ComfyUI-RMBG", "MatAnyone2": "ComfyUI-MatAnyone (FuouM)", "LoopCleanup": "кнопка «Скачать и установить всё» на странице",
+                     "TelegramStickerWebM": "кнопка «Скачать и установить всё» на странице", "GLSLShader": "обновите ComfyUI", "ComfySwitchNode": "обновите ComfyUI"}
             raise web.HTTPBadRequest(text="В вашем ComfyUI нет нод: " + "; ".join(f"{c}" + (f" ({hints[c]})" if c in hints else "") for c in missing))
         if mode == "image":
             for cls, field, key in (("UNETLoader", "unet_name", "105:6"), ("LoraLoaderModelOnly", "lora_name", "105:121"), ("CLIPLoader", "clip_name", "105:13"),
@@ -4462,7 +4978,8 @@ class App:
                     tail = graph[key]["inputs"][field].replace("\\", "/").split("/")[-1].lower()
                     alt = next((n for n in have if n.replace("\\", "/").split("/")[-1].lower() == tail), None)
                     if not alt:
-                        raise web.HTTPBadRequest(text="В ComfyUI не найден файл модели: " + graph[key]["inputs"][field] + ". Он нужен для видео из картинки.")
+                        raise web.HTTPBadRequest(text="В ComfyUI не найден файл модели: " + graph[key]["inputs"][field] + ". Он нужен для видео из картинки: "
+                                                      "на странице «Web-анимация» нажмите «Скачать и установить всё».")
                     graph[key]["inputs"][field] = alt
             alt = next((n for n in await self.comfy_choices("VAELoader", "vae_name") if n.replace("\\", "/").split("/")[-1].lower() == "minimax_h3_audio_vae_fp32.safetensors"), None)
             if alt:
@@ -6131,18 +6648,16 @@ class App:
             # frames cut out of a video are the last pictures of a message and are not hero pictures (Picture N)
             ctx["images"] = sum(max(0, len(m.get("images") or []) - int(m.get("frames") or 0)) for m in messages if m["role"] == "user")
             active = self.skills.active(ag.chat_text(messages), target, ctx.get("model"))
-            if target == "long" and (ctx.get("long") or {}).get("clip") and not self.remote() and ag.LLM_VARIANTS[variant]["ctx"] < 60000:
-                # the music-clip page on a local model with a small memory (under 60 thousand tokens): the acting skill (36 thousand characters) does not fit next to a long song text, so it is skipped;
-                # with Qwen (65 thousand) and with an internet model the skill stays on, so the scenes get emotions and drama
-                active = [s for s in active if s["id"] != "akterskaya-igra"]
             if target == "actor" and not any(s["id"] == "akterskaya-igra" for s in active):
                 # this mode is acting-first: its skill is always on here
                 active += [s for s in self.skills.list() if s["id"] == "akterskaya-igra" and s["mode"] != "off"]
             if target == "chat" and body.get("skills"):   # the skills picked by hand for this chat (chips), whatever their Auto/Off mode
                 want = [str(x) for x in body["skills"]]
                 active = [s for s in self.skills.list() if s["id"] in want]
+            # the Agent works by the SHORT versions of the skills (the main rules only: SHORT.md); the full texts stay for the screenwriter chat and the chat with hand-picked skills
+            short_skills = {s["id"] for s in active if (s["path"] / "SHORT.md").exists()} if target not in ("chat", "script") else set()
             await send({"type": "skills", "names": [s["name"] for s in active]})
-            system = ag.system_prompt("\n\n".join(self.skills.text(s) for s in active), target, ctx)
+            system = ag.system_prompt("\n\n".join(self.skills.text(s, short=s["id"] in short_skills) for s in active), target, ctx)
             if self.remote():   # the real model answers, so it must say who it is (otherwise it repeats «an assistant of the program»)
                 system += (f"\n\nТы работаешь на модели «{self.remote()['model']}», она подключена через интернет-сервис. Если пользователь спрашивает, какая ты модель, "
                            "назови именно её (и разработчика, если знаешь). Не говори, что ты локальная модель программы.")
@@ -6572,6 +7087,10 @@ def build_app(comfy_override=None):
         web.post("/api/mode/offered", state.h_mode_offered),
         web.post("/api/setup/cancel", state.h_setup_cancel),
         web.post("/api/comfy/update", state.h_comfy_update),
+        web.post("/api/comfy/update-own", state.h_comfy_update_own),
+        web.post("/api/prepare_item", state.h_prepare_item),
+        web.get("/api/extra_file", state.h_extra_file),
+        web.post("/api/extra_file", state.h_extra_file_do),
         web.post("/api/comfy/fix-torch", state.h_comfy_fix_torch),
         web.post("/api/comfy/restart", state.h_comfy_restart),
         web.get("/api/settings/comfy-flags", state.h_comfy_flags),
@@ -6592,7 +7111,10 @@ def build_app(comfy_override=None):
         web.post("/api/report", state.h_report),
         web.post("/api/setup/reset", state.h_setup_reset),
         web.post("/api/generate/video", state.h_generate_video),
-        web.post("/api/generate/krea", state.h_generate_krea),
+        web.post("/api/generate/krea", state.image_route(state.h_generate_krea)),
+        web.get("/api/rh_images", state.h_rh_images),
+        web.post("/api/rh_images", state.h_rh_images),
+        web.post("/api/rh_images/check", state.h_rh_images_check),
         web.get("/api/dlss_check", state.h_dlss_check),
         web.post("/api/dlss_open", state.h_dlss_open),
         web.post("/api/upscale", state.h_upscale),
@@ -6603,12 +7125,12 @@ def build_app(comfy_override=None):
         web.post("/api/td/run", state.h_td_run),
         web.post("/api/td/prepare", state.h_td_prepare),
         web.post("/api/td/prepare-cancel", state.h_td_prepare_cancel),
+        web.post("/api/icons/prepare", state.h_icons_prepare),
         web.get("/api/td/file", state.h_td_file),
         web.get("/vendor/{name}", state.h_vendor),
         web.post("/api/td/save-to", state.h_td_save_to),
         web.post("/api/td/open", state.h_td_open),
         web.get("/api/icons/info", state.h_icons_info),
-        web.post("/api/icons/install", state.h_icons_install),
         web.post("/api/icons/cut", state.h_icons_cut),
         web.post("/api/icons/prep", state.h_icons_prep),
         web.post("/api/icons/video", state.h_icons_video),
@@ -6621,8 +7143,8 @@ def build_app(comfy_override=None):
         web.get("/api/update/check", state.h_update_check),
         web.get("/api/update/progress", state.h_update_progress),
         web.post("/api/update/install", state.h_update_install),
-        web.post("/api/generate/qwen", state.h_generate_qwen),
-        web.post("/api/generate/inpaint", state.h_generate_inpaint),
+        web.post("/api/generate/qwen", state.image_route(state.h_generate_qwen)),
+        web.post("/api/generate/inpaint", state.image_route(state.h_generate_inpaint)),
         web.post("/api/generate/lipsync", state.h_generate_lipsync),
         web.get("/api/nodes", state.h_nodes),
         web.get("/api/models/files", state.h_models_files),

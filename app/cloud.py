@@ -30,8 +30,24 @@ MESSAGES = {
 
 
 class CloudError(Exception):
-    def __init__(self, msg):
+    def __init__(self, msg, node_errors=None):
         super().__init__(MESSAGES.get(msg, msg))
+        self.node_errors = node_errors or {}   # ComfyUI's own list of what is wrong in which node, when RunningHub sends it
+
+
+def node_errors_in(*texts):
+    """The `node_errors` dict hidden in any of RunningHub's answer fields (a JSON string or a dict), {} when none."""
+    for t in texts:
+        if isinstance(t, str):
+            try:
+                t = json.loads(t)
+            except ValueError:
+                continue
+        if isinstance(t, dict):
+            found = t.get("node_errors") or node_errors_in(t.get("promptTips"))
+            if found:
+                return found
+    return {}
 
 
 class RunningHub:
@@ -87,6 +103,16 @@ class RunningHub:
                     names.add(v)
         return names
 
+    async def workflow(self, workflow_id):
+        """The user's saved RunningHub workflow in API format (switched-off nodes are not in it)."""
+        res = await self.post("/api/openapi/getJsonApiFormat", {"workflowId": str(workflow_id)})
+        if res.get("code") != 0:
+            raise CloudError(res.get("msg") or "Не удалось прочитать workflow")
+        try:
+            return json.loads((res.get("data") or {}).get("prompt") or "{}")
+        except ValueError:
+            raise CloudError("RunningHub прислал workflow в непонятном виде")
+
     async def create(self, graph, workflow_id, instance_type="default"):
         body = {"workflowId": str(workflow_id), "workflow": json.dumps(graph, ensure_ascii=False),
                 "addMetadata": False}
@@ -94,14 +120,14 @@ class RunningHub:
             body["instanceType"] = instance_type
         res = await self.post("/task/openapi/create", body)
         if res.get("code") != 0:
-            raise CloudError(res.get("msg") or "RunningHub отклонил задание")
+            raise CloudError(res.get("msg") or "RunningHub отклонил задание", node_errors_in(res.get("data"), res.get("msg")))
         data = res.get("data") or {}
         tips = data.get("promptTips")
         if tips:
             try:
                 t = json.loads(tips)
                 if t.get("node_errors"):
-                    raise CloudError("Ошибка в графе на RunningHub: " + json.dumps(t["node_errors"], ensure_ascii=False)[:500])
+                    raise CloudError("Ошибка в графе на RunningHub: " + json.dumps(t["node_errors"], ensure_ascii=False)[:500], t["node_errors"])
             except ValueError:
                 pass
         return str(data["taskId"])
