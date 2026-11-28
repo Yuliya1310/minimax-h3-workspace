@@ -213,6 +213,7 @@
 #ddMenu{position:fixed;z-index:80;min-width:240px;padding:6px;border-radius:12px;background:var(--surface);border:1px solid var(--line-2);box-shadow:0 12px 32px rgba(0,0,0,.35);display:grid;gap:2px}#ddMenu button{display:flex;align-items:center;gap:9px;text-align:left;border:0;background:none;color:var(--text);padding:9px 11px;border-radius:8px;cursor:pointer;font:inherit;font-size:13px;font-weight:600}#ddMenu button svg{width:16px;height:16px;flex:none;opacity:.8}#ddMenu button:hover{background:var(--accent-soft,var(--surface-2))}#ddMenu button.on{color:var(--accent)}#modeBar .mb-dd::after{content:'▾';margin-left:4px;font-size:10px;opacity:.7}
 #rhMenu{position:fixed;z-index:80;min-width:250px;padding:6px;border-radius:12px;background:var(--surface);border:1px solid var(--line-2);box-shadow:0 12px 32px rgba(0,0,0,.35);display:grid;gap:2px}#rhMenu button{display:grid;text-align:left;border:0;background:none;color:var(--text);padding:8px 10px;border-radius:8px;cursor:pointer;font:inherit}#rhMenu button b{font-size:13px}#rhMenu button small{color:var(--muted);font-size:11.5px}#rhMenu button:hover{background:var(--accent-soft)}
 .ag-open{display:inline-flex;align-items:center;gap:7px;margin:0 auto 0 12px;padding:6px 14px;white-space:nowrap;font-weight:700;color:var(--text);border:1px solid rgba(var(--accent-rgb),.7);background:var(--accent-soft);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.22),0 0 14px rgba(var(--accent-rgb),.38);animation:agGlow 2.6s ease-in-out infinite}
+.ic-wrap[data-icsrc="video"] .card-h:has(.ag-open),.ic-wrap[data-icsrc="video"] .ag-edit-box{display:none!important}
 .ag-open svg{width:17px;height:17px;flex:none;color:var(--accent)}
 .ag-open:hover{border-color:var(--accent);box-shadow:0 0 0 2px rgba(var(--accent-rgb),.4),0 0 22px rgba(var(--accent-rgb),.55);animation:none}
 @keyframes agGlow{0%,100%{box-shadow:0 0 0 1px rgba(var(--accent-rgb),.22),0 0 10px rgba(var(--accent-rgb),.28)}50%{box-shadow:0 0 0 1px rgba(var(--accent-rgb),.4),0 0 18px rgba(var(--accent-rgb),.55)}}
@@ -402,6 +403,18 @@ body.nosb-on::after{left:0}
 @media (max-height:760px){.side-foot{gap:6px;padding:10px 12px}.side-foot .stat{font-size:11.5px}}
 
 /* main */
+/* OPEN TABS (the sections the user has opened, like in a browser). To remove the feature: delete this block and the script block with the same name */
+#openTabs{position:fixed;top:46px;left:var(--sbw,248px);right:0;z-index:33;display:flex;align-items:center;gap:5px;height:42px;padding:4px 24px 4px 22px;background:var(--bg);border-bottom:1px solid var(--line);overflow-x:auto;white-space:nowrap;scrollbar-width:thin}
+#openTabs[hidden]{display:none}
+body.nosb-on #openTabs{left:0}
+#openTabs .ot{flex:none;display:inline-flex;align-items:center;height:30px;border:1px solid var(--line-2);border-radius:9px;background:var(--surface);overflow:hidden}
+#openTabs .ot button{height:100%;border:0;background:none;color:var(--text);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer}
+#openTabs .ot-go{padding:0 6px 0 12px}
+#openTabs .ot-x{padding:0 9px;opacity:.55;font-size:15px}
+#openTabs .ot-x:hover{opacity:1;color:var(--accent)}
+#openTabs .ot.on{border-color:var(--accent);background:var(--accent-soft,var(--surface-2))}
+#openTabs .ot.on .ot-go{color:var(--accent)}
+.main.has-tabs .view{padding-top:104px}.main.has-tabs .preview{top:96px}
 .main{overflow:auto}
 .view{display:none;padding:28px clamp(20px,2.2vw,44px) 40px}
 .view.active{display:block;animation:fade .25s ease}
@@ -1654,7 +1667,11 @@ img.pr-media{object-position:center 38%}
             <div id="agBig" class="agbig"></div>
             <details class="agvar" id="agApi"><summary>Подключить умную модель через интернет</summary>
               <div class="hint" style="margin:6px 0 8px">Если у вас есть ключ от сервиса (OpenRouter, AnyModel и др.), агент будет работать через него: видеокарта не нагружается, скачивать модель не нужно. На OpenRouter есть бесплатные модели.</div>
-              <label class="hint" style="display:block;margin-bottom:3px">1. Где у вас есть ключ</label>
+              <label class="hint" style="display:block;margin-bottom:3px">Профиль (сохранённое подключение): выбрали другой, и Агент работает с ним</label>
+              <div class="row" style="gap:6px;flex-wrap:nowrap"><select id="apiProf" class="dl-in" style="flex:1;min-width:0"></select><button type="button" class="btn mini" id="apiDel" hidden>Удалить</button></div>
+              <label class="hint" style="display:block;margin:8px 0 3px">Название профиля (по желанию)</label>
+              <input id="apiName" class="dl-in" spellcheck="false" maxlength="60" placeholder="Например: для сценариев">
+              <label class="hint" style="display:block;margin:8px 0 3px">1. Где у вас есть ключ</label>
               <select id="apiSvc" class="dl-in"></select>
               <div id="apiOther" hidden style="margin-top:6px">
                 <input id="apiUrl" class="dl-in" spellcheck="false" placeholder="Адрес сервиса, например https://api.groq.com/openai/v1">
@@ -1665,7 +1682,7 @@ img.pr-media{object-position:center 38%}
               <input id="apiModel" class="dl-in" spellcheck="false" placeholder="Название модели">
               <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">
                 <button type="button" class="btn mini" id="apiTest">Проверить</button>
-                <button type="button" class="btn mini pri" id="apiSave">Включить</button>
+                <button type="button" class="btn mini pri" id="apiSave">Сохранить и включить</button>
                 <button type="button" class="btn mini" id="apiOff" hidden>Выключить</button>
               </div>
               <div id="apiMsg" class="hint" style="margin-top:6px"></div>
@@ -2307,6 +2324,41 @@ function rhMenuToggle(btn) {
   new MutationObserver(paint).observe($('aside') || document.body, { attributes: true, attributeFilter: ['hidden', 'class'], subtree: true });
   window.addEventListener('resize', paint);   // window size
   new MutationObserver(paint).observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });   // zoom A-/A+ and the width of the side menu
+  paint();
+})();
+/* OPEN TABS: every section the user opens gets a tab under the top bar; one click goes back to it. The pages stay as they were left
+   (they are only hidden), so nothing typed or loaded is lost. A cross only removes the tab. */
+(function () {
+  const main = $('.main'), bar = document.createElement('div'); bar.id = 'openTabs'; bar.hidden = true; document.body.appendChild(bar);
+  const NAMES = { video: 'Image to Video', long: 'Видеостудия', refs: 'Референсы', action: 'Экшн-видео', swap: 'Замена персонажа', lipsync: 'Lipsync', actor: 'Актёр',
+    krea: 'Изображение по тексту', qwen: 'Редактирование', inpaint: 'Инпейнт', imgedit: 'Редактирование', icons: 'Web-анимация', tgsticker: 'Стикеры Telegram', td: '3D',
+    voicelab: 'Voice Lab', reflab: 'Студия референсов', refmode: 'Reference Mode', upfile: 'Увеличить', library: 'Библиотека', queue: 'Очередь', models: 'Настройки' };
+  const SKIP = ['presets', 'setup'], MAX = 10;
+  let tabs = [];
+  try { tabs = (JSON.parse(localStorage.getItem('h3-open-tabs')) || []).filter(v => typeof v === 'string' && /^[\w-]+$/.test(v)); } catch {}
+  const active = () => ($('.view.active')?.id || '').replace('view-', '');
+  const title = v => NAMES[v] || ($(`#view-${v} h1`)?.textContent || $(`.nav[data-view="${v}"]`)?.textContent || v).trim();
+  const save = () => { try { localStorage.setItem('h3-open-tabs', JSON.stringify(tabs)); } catch {} };
+  function paint() {
+    const cur = active();
+    if (cur && !SKIP.includes(cur) && !tabs.includes(cur)) { tabs.push(cur); while (tabs.length > MAX) tabs.shift(); save(); }
+    const list = tabs.filter(v => $('#view-' + v));
+    bar.hidden = !list.length || (list.length === 1 && list[0] === cur);   // one open section: nothing to switch between
+    main.classList.toggle('has-tabs', !bar.hidden);
+    const html = list.map(v => `<span class="ot${v === cur ? ' on' : ''}" data-v="${v}"><button type="button" class="ot-go">${title(v).replace(/[<>&"]/g, '')}</button><button type="button" class="ot-x" title="Убрать вкладку">×</button></span>`).join('');
+    if (bar.innerHTML !== html) bar.innerHTML = html;
+  }
+  bar.onclick = e => {
+    const t = e.target.closest('.ot'); if (!t) return;
+    const v = t.dataset.v;
+    if (!e.target.closest('.ot-x')) { if (v !== active()) goTo(v); return; }
+    const i = tabs.indexOf(v), was = v === active();
+    tabs.splice(i, 1); save();
+    if (was) goTo(tabs[Math.min(i, tabs.length - 1)] || 'presets');
+    paint();
+  };
+  bar.addEventListener('wheel', e => { if (bar.scrollWidth > bar.clientWidth) { bar.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
+  new MutationObserver(paint).observe(main, { attributes: true, attributeFilter: ['class'], subtree: true, childList: false });
   paint();
 })();
 let SQ_ASKED = false;
@@ -10076,12 +10128,20 @@ async function apiLoad() {
   const c = AGAPI.cfg = await (await fetch('/api/llmapi')).json();
   const sel = $('#apiSvc');
   if (!sel.options.length) sel.innerHTML = Object.entries(c.services).map(([k, v]) => `<option value="${k}">${esc(v.title)}</option>`).join('');
-  sel.value = c.svc; apiPaint();
-  $('#apiModel').value = c.model || ''; $('#apiUrl').value = c.url || '';
-  $('#apiKey').value = ''; $('#apiKey').placeholder = c.has_key ? '•••••••• (ключ сохранён; чтобы заменить, вставьте новый)' : 'Вставьте ключ';
+  $('#apiProf').innerHTML = c.profiles.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('') + '<option value="">+ Новый профиль</option>';
+  apiShow(c.current || c.profiles[0]?.id || '');
   $('#apiOff').hidden = !c.on;
-  $('#agApi > summary').textContent = c.on && c.ready ? 'Подключено через интернет: ' + c.services[c.svc].title + ' ✓' : 'Подключить умную модель через интернет';
-  if (c.on && c.ready) $('#agApi').classList.add('on');
+  const act = c.profiles.find(p => p.id === c.current);
+  $('#agApi > summary').textContent = c.on && c.ready && act ? 'Подключено через интернет: ' + act.name + ' ✓' : 'Подключить умную модель через интернет';
+  $('#agApi').classList.toggle('on', !!(c.on && c.ready));
+}
+function apiShow(id) {   // the fields of one profile ('' = a new one)
+  const c = AGAPI.cfg, p = c.profiles.find(x => x.id === id);
+  $('#apiProf').value = p ? p.id : ''; $('#apiDel').hidden = !p;
+  $('#apiName').value = p ? p.name : ''; $('#apiSvc').value = p ? p.svc : 'openrouter'; apiPaint();
+  $('#apiModel').value = p?.model || ''; $('#apiUrl').value = p?.url || '';
+  $('#apiKey').value = ''; $('#apiKey').placeholder = p?.has_key ? '•••••••• (ключ сохранён; чтобы заменить, вставьте новый)' : 'Вставьте ключ';
+  $('#apiMsg').textContent = '';
 }
 function apiPaint() {
   const c = AGAPI.cfg, k = $('#apiSvc').value, sv = c.services[k];
@@ -10091,19 +10151,22 @@ function apiPaint() {
   $('#apiModelHint').textContent = sv.model ? '(можно оставить как есть)' : '';
 }
 $('#apiSvc').onchange = () => { apiPaint(); $('#apiModel').value = ''; };
-const apiBody = () => ({ svc: $('#apiSvc').value, model: $('#apiModel').value, url: $('#apiUrl').value, key: $('#apiKey').value });
+const apiBody = () => ({ id: $('#apiProf').value, name: $('#apiName').value, svc: $('#apiSvc').value, model: $('#apiModel').value, url: $('#apiUrl').value, key: $('#apiKey').value });
+const apiDo = async (body, done) => { try { await postJSON('/api/llmapi', body); toast(done); await apiLoad(); agStatus(); } catch (e) { toast(e.message); } };
+$('#apiProf').onchange = async () => {
+  const id = $('#apiProf').value; apiShow(id);
+  if (!id || !AGAPI.cfg.on) return;   // the connection is off: «Сохранить и включить» turns the shown profile on
+  await apiDo({ select: id }, 'Агент работает с профилем «' + $('#apiProf').selectedOptions[0].textContent + '»');
+};
 $('#apiTest').onclick = async () => {
   const m = $('#apiMsg'); m.textContent = 'Проверяю…'; m.className = 'hint';
   try { const r = await (await fetch('/api/llmapi/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(apiBody()) })).json();
     m.textContent = r.ok ? 'Подключено, модель отвечает.' : r.error; m.className = 'hint ' + (r.ok ? 'ok-t' : 'warn-t'); }
   catch { m.textContent = 'Нет связи с программой'; m.className = 'hint warn-t'; }
 };
-$('#apiSave').onclick = async () => {
-  const b = apiBody(); if (!b.key && !AGAPI.cfg.has_key) { $('#apiMsg').textContent = 'Сначала вставьте ключ'; $('#apiMsg').className = 'hint warn-t'; return; }
-  try { await postJSON('/api/llmapi', { ...b, on: true }); toast('Агент теперь работает через интернет'); await apiLoad(); agStatus(); }
-  catch (e) { toast(e.message); }
-};
-$('#apiOff').onclick = async () => { try { await postJSON('/api/llmapi', { on: false }); toast('Вернулась локальная модель'); await apiLoad(); agStatus(); } catch (e) { toast(e.message); } };
+$('#apiSave').onclick = () => apiDo(apiBody(), 'Профиль сохранён, Агент работает через интернет');
+$('#apiDel').onclick = () => { const id = $('#apiProf').value, name = $('#apiProf').selectedOptions[0].textContent; confirmBox('Удалить профиль?', `Профиль «${name}» и его ключ будут удалены из программы.`, 'Удалить', () => apiDo({ delete: id }, 'Профиль удалён')); };
+$('#apiOff').onclick = () => apiDo({ on: false }, 'Вернулась локальная модель');
 apiLoad();
 
 // model status / download
@@ -13649,12 +13712,12 @@ window.needs = (() => {
     const S = { src: 'image', method: 'matanyone', busy: false, img: null, imgUrl: '', vid: '', vfile: null, info: null };
     const outputs = tg ? `
       <div class="card">
-        <div class="card-h"><h3><span class="n">3</span>Что получится</h3></div>
+        <div class="card-h"><h3>Что получится</h3></div>
         <div class="ic-opt on"><label><b>Стикер Telegram (WebM)</b></label><span class="hint">прозрачный фон, 512 px, до 256 КБ, до 3 секунд: как требует Telegram</span></div>
         <label class="fld" style="margin-top:16px">Название для файлов<input type="text" class="dl-in ic-name" placeholder="например: privet" style="width:280px"></label>
       </div>` : `
       <div class="card">
-        <div class="card-h"><h3><span class="n">3</span>Размер и что сохранить</h3></div>
+        <div class="card-h"><h3>Размер и что сохранить</h3></div>
         <label class="fld" style="margin-bottom:6px">Размер WEBP и кадров спрайт-листа (длинная сторона)<select class="dl-in ic-size" style="width:240px">${SIZES.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
         <div class="hint" style="margin-bottom:14px">Кадры PNG всегда сохраняются в размере самого видео.</div>
         <div style="display:grid;gap:8px">
@@ -13663,20 +13726,31 @@ window.needs = (() => {
             <div class="ic-sub ic-spr"><label class="fld">Колонок (0 = само)<input type="number" class="dl-in ic-cols" min="0" max="40" value="0" style="width:80px"></label><label class="fld">Брать кадры<select class="dl-in ic-step"><option value="1">все (24 к/с)</option><option value="2" selected>каждый 2-й (12 к/с)</option><option value="3">каждый 3-й (8 к/с)</option><option value="4">каждый 4-й (6 к/с)</option></select></label></div></div>
           <div class="ic-opt on"><label><input type="checkbox" class="ic-o-webp" checked><b>Анимированный WEBP</b></label><span class="hint">лёгкий, с прозрачностью: для сайтов</span></div>
         </div>
+        <label class="fld" style="margin-top:16px">Сколько кадров оставить (0 = не ограничивать)<input type="number" class="dl-in ic-count" min="0" max="200" step="1" value="0" style="width:100px"></label>
+        <div class="hint" style="margin-top:6px">Для 2D-игр обычно хватает 6–12 кадров на действие: файлы получаются намного легче. Кадры берутся равномерно по всему движению и попадают в PNG, спрайт-лист и WEBP. Если число задано, список «Брать кадры» не используется.</div>
         <label class="fld" style="margin-top:16px">Название для файлов<input type="text" class="dl-in ic-name" placeholder="например: knight_attack" style="width:280px"></label>
       </div>`;
-    const HELP_IC = '<div class=\"ic-help\"><h3 style=\"margin:0 0 10px;font-size:14px\">Как пользоваться</h3><ol style=\"margin:0;padding-left:20px;display:grid;gap:9px;font-size:13px;line-height:1.45;color:var(--muted)\"><li><b>Источник.</b> «Из картинки» — H3 оживит вашу картинку. «Из моего видео» — H3 не нужен, из готового видео просто удалится фон.</li><li><b>Картинка и промпт.</b> Загрузите картинку персонажа. В поле промпта опишите словами, что он делает, и нажмите «Агент»: он напишет готовый промпт для H3. Свой готовый промпт можно вставить как есть.</li><li><b>Длительность и размер.</b> Для зацикленной анимации хватает 3–5 секунд. Размер видео оставьте как есть: больше — дольше и тяжелее.</li><li><b>Вырезка фона.</b> «MatAnyone» — самый чистый край, если фон не однотонный. «RMBG» — быстрее. «Зелёный ключ» — когда персонаж на ровном зелёном фоне. Если по краю остаётся кайма, сдвиньте «Край» к минусу.</li><li><b>Подрезать шов цикла.</b> Оставьте галочку, чтобы анимация зациклилась без скачка. Если движение пропало и осталась статичная картинка, галочку уберите.</li><li><b>Что сохранить.</b> Отметьте PNG-кадры, спрайт-лист и/или WEBP, при желании задайте имя. Нажмите «Сделать анимацию» и подождите: результат появится здесь, а файлы лягут в папку результатов (кнопка «Открыть папку с результатом»).</li></ol></div>', HELP_TG = '<div class=\"ic-help\"><h3 style=\"margin:0 0 10px;font-size:14px\">Как пользоваться</h3><ol style=\"margin:0;padding-left:20px;display:grid;gap:9px;font-size:13px;line-height:1.45;color:var(--muted)\"><li><b>Источник.</b> «Из картинки» — H3 оживит вашу картинку. «Из моего видео» — из готового видео просто удалится фон.</li><li><b>Картинка и промпт.</b> Загрузите персонажа. Опишите словами действие и нажмите «Агент»: он напишет промпт для H3.</li><li><b>Вырезка фона.</b> «MatAnyone» — самый чистый край. «RMBG» — быстрее. «Зелёный ключ» — для ровного зелёного фона.</li><li><b>Результат.</b> Размер 512 px и вес до 256 КБ подбираются сами. Нажмите «Сделать стикер»: готовый WebM появится здесь и в папке результатов (кнопка «Открыть папку с результатом»). Его можно сразу загружать в бота @Stickers.</li></ol></div>';
+    const HELP_IC = '<div class=\"ic-help\"><h3 style=\"margin:0 0 10px;font-size:14px\">Как пользоваться</h3><ol style=\"margin:0;padding-left:20px;display:grid;gap:9px;font-size:13px;line-height:1.45;color:var(--muted)\"><li><b>Источник.</b> «По изображению» — H3 оживит вашу картинку. «Из видео» — H3 не нужен, из готового видео просто удалится фон. «Повтор движений из видео» — персонаж с картинки повторит движения из вашего видео (удары, прыжки), и сразу удалится фон.</li><li><b>Картинка и промпт.</b> Загрузите картинку персонажа. В поле промпта опишите словами, что он делает, и нажмите «Агент»: он напишет готовый промпт для H3. Свой готовый промпт можно вставить как есть.</li><li><b>Длительность и размер.</b> Для зацикленной анимации хватает 3–5 секунд. Размер видео оставьте как есть: больше — дольше и тяжелее.</li><li><b>Вырезка фона.</b> «MatAnyone» — самый чистый край, если фон не однотонный. «RMBG» — быстрее. «Зелёный ключ» — когда персонаж на ровном зелёном фоне. Если по краю остаётся кайма, сдвиньте «Край» к минусу.</li><li><b>Подрезать шов цикла.</b> Оставьте галочку, чтобы анимация зациклилась без скачка. Если движение пропало и осталась статичная картинка, галочку уберите.</li><li><b>Что сохранить.</b> Отметьте PNG-кадры, спрайт-лист и/или WEBP, при желании задайте имя. Нажмите «Сделать анимацию» и подождите: результат появится здесь, а файлы лягут в папку результатов (кнопка «Открыть папку с результатом»).</li></ol></div>', HELP_TG = '<div class=\"ic-help\"><h3 style=\"margin:0 0 10px;font-size:14px\">Как пользоваться</h3><ol style=\"margin:0;padding-left:20px;display:grid;gap:9px;font-size:13px;line-height:1.45;color:var(--muted)\"><li><b>Источник.</b> «По изображению» — H3 оживит вашу картинку. «Из видео» — из готового видео просто удалится фон.</li><li><b>Картинка и промпт.</b> Загрузите персонажа. Опишите словами действие и нажмите «Агент»: он напишет промпт для H3.</li><li><b>Вырезка фона.</b> «MatAnyone» — самый чистый край. «RMBG» — быстрее. «Зелёный ключ» — для ровного зелёного фона.</li><li><b>Результат.</b> Размер 512 px и вес до 256 КБ подбираются сами. Нажмите «Сделать стикер»: готовый WebM появится здесь и в папке результатов (кнопка «Открыть папку с результатом»). Его можно сразу загружать в бота @Stickers.</li></ol></div>';
     root.innerHTML = `
-    <style>.ic-wrap input[type=checkbox]{accent-color:var(--accent);width:17px;height:17px;flex:none}.ic-wrap .seg2{grid-template-columns:repeat(2,1fr);max-width:380px;margin-bottom:14px}.ic-wrap .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}.ic-wrap .fld{display:grid;gap:6px;font-size:12.5px;color:var(--muted)}.ic-wrap .fld .dl-in{width:auto;min-width:90px}.ic-wrap .mcol{display:grid;gap:8px}.ic-wrap .mcol .chip{display:grid;gap:3px;text-align:left;padding:12px 14px;cursor:pointer}.ic-wrap .mcol .chip small{white-space:normal;line-height:1.4}.ic-wrap .ic-opt{display:grid;gap:2px;padding:10px 12px;border-radius:11px;background:var(--bg-2);border:1px solid var(--line)}.ic-wrap .ic-opt.on{border-color:var(--accent);background:var(--accent-soft)}.ic-wrap .ic-opt>label{display:flex;gap:10px;align-items:center;cursor:pointer;font-size:13.5px}.ic-wrap .ic-opt .hint{margin-left:27px}.ic-wrap .ic-sub{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0 2px 27px;align-items:end}</style>
+    <style>.ic-wrap input[type=checkbox]{accent-color:var(--accent);width:17px;height:17px;flex:none}.ic-wrap .seg2{grid-template-columns:repeat(2,1fr);max-width:380px;margin-bottom:14px}.ic-wrap .seg2.seg3{grid-template-columns:repeat(3,1fr);max-width:620px}.ic-wrap [data-blk][hidden],.ic-wrap [data-only][hidden],.ic-wrap .ic-rv[hidden],.ic-wrap .ic-vv[hidden]{display:none!important}.ic-wrap .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}.ic-wrap .fld{display:grid;gap:6px;font-size:12.5px;color:var(--muted)}.ic-wrap .fld .dl-in{width:auto;min-width:90px}.ic-wrap .mcol{display:grid;gap:8px}.ic-wrap .mcol .chip{display:grid;gap:3px;text-align:left;padding:12px 14px;cursor:pointer}.ic-wrap .mcol .chip small{white-space:normal;line-height:1.4}.ic-wrap .ic-opt{display:grid;gap:2px;padding:10px 12px;border-radius:11px;background:var(--bg-2);border:1px solid var(--line)}.ic-wrap .ic-opt.on{border-color:var(--accent);background:var(--accent-soft)}.ic-wrap .ic-opt>label{display:flex;gap:10px;align-items:center;cursor:pointer;font-size:13.5px}.ic-wrap .ic-opt .hint{margin-left:27px}.ic-wrap .ic-sub{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0 2px 27px;align-items:end}</style>
     <div class="ic-wrap">
     <div class="head"><div><h1>${cfg.title}</h1><p>${cfg.sub}</p></div></div>
     <div class="seg seg2" style="max-width:520px;margin:-4px 0 16px"><button type="button" data-icsw="icons" class="${tg ? '' : 'on'}">Иконки и персонажи</button><button type="button" data-icsw="tgsticker" class="${tg ? 'on' : ''}">Стикеры для Telegram</button></div>
     <div class="ic-note card" hidden style="margin-bottom:16px;border-color:var(--accent)"></div>
     <div class="grid"><div class="col">
       <div class="card">
-        <div class="card-h"><h3><span class="n">1</span>Откуда взять анимацию</h3></div>
-        <div class="seg seg2"><button type="button" class="on" data-src="image">Из картинки</button><button type="button" data-src="video">Из моего видео</button></div>
-        <div data-blk="image">
+        <div class="card-h" style="justify-content:flex-end"></div>
+        <div class="seg seg2${tg ? '' : ' seg3'}"><button type="button" class="on" data-src="image">По изображению</button><button type="button" data-src="video">Из видео</button>${tg ? '' : '<button type="button" data-src="motion">Повтор движений из видео</button>'}</div>
+        <div class="note ic-tip" style="margin-top:12px;margin-bottom:14px;display:block;font-size:13.5px;line-height:1.55;color:var(--text);border:2px solid var(--accent);background:var(--accent-soft)">💡 <b>Совет по вырезке фона.</b> Если у персонажа сложные детали (рога, шипы, когти, доспехи) или край получился рваным: ниже, в блоке «Убрать фон», выберите <b>«RMBG»</b> и поставьте <b>«Край» −1</b>. Если после этого край мерцает, вернитесь на <b>«MatAnyone»</b>. Заново делать видео не нужно: откройте вкладку «Из видео», нажмите «Из Библиотеки», выберите готовый ролик и вырежьте фон ещё раз.</div>
+        <div data-blk="image motion">
+          <div data-only="motion" hidden style="margin-bottom:14px">
+            <div class="row"><button type="button" class="btn ic-rlib">Из Библиотеки</button><label class="btn">Видео с движениями<input type="file" class="ic-rf" accept="video/*" hidden></label><span class="hint ic-rn">Видео не выбрано</span></div>
+            <video class="ic-rv" controls muted loop autoplay playsinline hidden style="display:block;margin-top:10px;max-width:100%;max-height:320px;border-radius:11px;border:1px solid var(--line);background:#000"></video>
+            <div class="hint" style="margin-top:8px">Из видео берутся только движения: персонаж, одежда и фон берутся с вашей картинки. Лучше всего: короткое видео 3–5 секунд (до 10), один персонаж виден целиком, камера не двигается. Картинка: персонаж в похожей позе и с тем же разворотом, что в начале видео, на зелёном фоне.</div>
+            <label class="fld" style="margin-top:10px">Длина движения, с (пусто = как у видео)<input type="text" inputmode="decimal" class="dl-in ic-mlen" placeholder="например: 1,3" style="width:140px"></label>
+            <div class="hint ic-rlen" style="margin-top:6px">Всё, что идёт после этой длины, отрезается. Можно с долями секунды.</div>
+            <label class="cw-chk" style="cursor:pointer;margin-top:10px"><input type="checkbox" class="ic-room" checked> <span>Свободное место вокруг персонажа (чтобы прыжок или удар не вышли за край)</span></label>
+          </div>
           <div style="display:grid;grid-template-columns:170px minmax(0,1fr);gap:16px;align-items:start">
             <label class="drop ic-drop" style="height:170px">
               <input type="file" class="ic-img" accept="image/*" hidden>
@@ -13686,9 +13760,11 @@ window.needs = (() => {
             <div style="display:grid;gap:12px">
               <textarea class="ic-prompt" placeholder="Опишите словами, что делает персонаж, и нажмите «Агент»: он напишет готовый промпт для H3. Или вставьте свой готовый: он уйдёт в модель как есть"></textarea>
               <div class="row">
-                ${tg ? '' : '<label class="fld">Длительность, с<input type="number" class="dl-in ic-dur" min="3" max="10" step="1" value="3" style="width:80px"></label>'}
+                ${tg ? '' : '<label class="fld" data-only="image">Длительность, с<input type="number" class="dl-in ic-dur" min="3" max="10" step="1" value="3" style="width:80px"></label>'}
+                ${tg ? '' : '<label class="fld" data-only="image" title="Видео делается как обычно, а потом всё движение целиком проигрывается за это время">Ускорить: всё движение за, с<input type="text" inputmode="decimal" class="dl-in ic-fast" placeholder="без ускорения" style="width:150px"></label>'}
                 <label class="fld">Размер видео<select class="dl-in ic-q"><option value="pic" selected>Как у картинки (до 768 px)</option><option value="512">Меньше: 512 px по длинной стороне</option><option value="1024">Больше: до 1024 px</option></select></label>
               </div>
+              ${tg ? '' : '<div class="hint" data-only="image">Нужна анимация на 1 секунду? Впишите <b>1</b> в «Ускорить». Модель всё равно делает минимум 3 секунды, программа ускоряет готовое движение: оно остаётся целым и по кругу. Пусто — как раньше.</div>'}
             </div>
           </div>
           <details style="margin-top:14px"><summary class="hint" style="cursor:pointer">Фон под персонажем (до видео)</summary>
@@ -13700,11 +13776,12 @@ window.needs = (() => {
         </div>
         <div data-blk="video" hidden>
           <div class="row"><button type="button" class="btn ic-lib">Из Библиотеки</button><label class="btn">С компьютера<input type="file" class="ic-vf" accept="video/*" hidden></label><span class="hint ic-vn">Видео не выбрано</span></div>
+          <video class="ic-vv" controls muted loop autoplay playsinline hidden style="display:block;margin-top:10px;max-width:100%;max-height:320px;border-radius:11px;border:1px solid var(--line);background:#000"></video>
           <div class="hint" style="margin-top:8px">Подойдёт любое видео с персонажем: из программы или своё.</div>
         </div>
       </div>
       <div class="card">
-        <div class="card-h"><h3><span class="n">2</span>Убрать фон</h3></div>
+        <div class="card-h"><h3>Убрать фон</h3></div>
         <div class="ic-meth mcol"></div>
         <div style="margin-top:16px"><div class="row" style="justify-content:space-between"><b style="font-size:13px">Край: <span class="ic-ev">−2</span></b><span class="hint">зелёная кайма: влево · съедены детали: вправо</span></div>
           <input type="range" class="ic-edge" min="-8" max="4" step="1" value="-2" style="margin-top:10px"></div>
@@ -13743,7 +13820,7 @@ window.needs = (() => {
       qa('.ic-adv-g').forEach(e => { e.hidden = S.method !== 'green'; }); qa('.ic-adv-m').forEach(e => { e.style.display = S.method === 'matanyone' ? 'flex' : 'none'; });
       paintNote();
     };
-    const needNodes = () => ['LoopCleanup', 'JoinImageWithAlpha', 'RMBG', 'MatAnyone2'].concat(tg ? ['TelegramStickerWebM'] : [], S.src === 'image' ? ['MiniMaxH3ImageToVideo'] : []);
+    const needNodes = () => ['LoopCleanup', 'JoinImageWithAlpha', 'RMBG', 'MatAnyone2'].concat(tg ? ['TelegramStickerWebM'] : [], S.src === 'image' ? ['MiniMaxH3ImageToVideo'] : [], S.src === 'motion' ? ['MiniMaxH3ReferenceToVideo', 'VHS_LoadVideo'] : []);
     const needFiles = () => (S.src === 'image' ? S.info?.files || [] : []);
     const missingNow = () => needNodes().some(c => !S.info.nodes[c]) || needFiles().some(f => f.missing);
     // the step-by-step memo for the two third-party nodes: where to download, where to put, what to do after
@@ -13774,8 +13851,9 @@ window.needs = (() => {
       if (!info.comfy) { card.show({ rows: [], message: '<b>ComfyUI не отвечает.</b> Запустите его: без него это не работает.' }); return; }
       if (!info.local) { card.show({ rows: [], message: '<b>Эта страница работает только с локальным ComfyUI</b> (не с облаком RunningHub).' }); return; }
       const n = info.nodes, rows = [], files = needFiles(), lost = files.filter(f => f.missing);
-      const fresh = n.JoinImageWithAlpha && (S.src !== 'image' || n.MiniMaxH3ImageToVideo);
+      const fresh = n.JoinImageWithAlpha && (S.src !== 'image' || n.MiniMaxH3ImageToVideo) && (S.src !== 'motion' || n.MiniMaxH3ReferenceToVideo);
       rows.push({ ok: fresh, text: 'ComfyUI свежей версии', hint: needs.oldComfy(info.managed), update: true });
+      if (S.src === 'motion') rows.push({ ok: n.VHS_LoadVideo, text: 'Нода ComfyUI-VideoHelperSuite (чтение видео с движениями)', hint: 'Установите её через ComfyUI Manager (поиск «VideoHelperSuite») и перезапустите ComfyUI. Модели те же, что в разделе «Референсы»: если их нет, добавьте этот режим в «Настройках».' });
       const own = n.LoopCleanup && n.TelegramStickerWebM;
       rows.push({ ok: own, text: 'Дополнения программы (зацикливание и стикер)', hint: 'Небольшие файлы из самой программы.', item: 'own' });
       let packsLost = false;
@@ -13794,11 +13872,26 @@ window.needs = (() => {
     }
     async function loadInfo() { try { S.info = await (await fetch('/api/icons/info')).json(); } catch { S.info = { comfy: false, nodes: {}, files: [], local: true }; } paintNote(); }
 
-    const setSrc = s => { S.src = s; qa('[data-src]').forEach(b => b.classList.toggle('on', b.dataset.src === s)); qa('[data-blk]').forEach(b => { b.hidden = b.dataset.blk !== s; }); paintNote(); };
+    const setSrc = s => {
+      const loop = q('.ic-loop');   // a strike or a jump must not be cut off as a «loop seam»: off for the motion tab, back as it was elsewhere
+      if (s === 'motion' && S.src !== 'motion') { S.loopWas = loop.checked; loop.checked = false; } else if (s !== 'motion' && S.src === 'motion') loop.checked = S.loopWas;
+      q('.ic-wrap').dataset.icsrc = s;
+      S.src = s; qa('[data-src]').forEach(b => b.classList.toggle('on', b.dataset.src === s));
+      qa('[data-blk]').forEach(b => { b.hidden = !b.dataset.blk.split(' ').includes(s); }); qa('[data-only]').forEach(b => { b.hidden = b.dataset.only !== s; });
+      const pr = q('.ic-prompt'); if (!pr.dataset.ph) pr.dataset.ph = pr.placeholder;
+      pr.placeholder = s === 'motion' ? 'Необязательно: что добавить. Движения берутся из видео, это поле можно оставить пустым' : pr.dataset.ph;
+      paintNote(); };
     qa('[data-src]').forEach(b => { b.onclick = () => setSrc(b.dataset.src); });
+    const preview = (sel, src) => { const v = q(sel); if (v._url) URL.revokeObjectURL(v._url); v._url = typeof src === 'string' ? '' : URL.createObjectURL(src); v.src = v._url || src; v.hidden = false; v.play().catch(() => {}); };   // the chosen video is shown right away
     q('.ic-img').onchange = e => { const f = e.target.files[0]; if (!f) return; S.img = f; if (S.imgUrl) URL.revokeObjectURL(S.imgUrl); S.imgUrl = URL.createObjectURL(f); const p = q('.ic-ip'); p.src = S.imgUrl; p.hidden = false; q('.ic-dh').hidden = true; if (!q('.ic-name').value) q('.ic-name').value = nm(f); };
-    q('.ic-vf').onchange = e => { const f = e.target.files[0]; if (!f) return; S.vfile = f; S.vid = ''; q('.ic-vn').textContent = f.name; if (!q('.ic-name').value) q('.ic-name').value = nm(f); };
-    q('.ic-lib').onclick = () => {
+    q('.ic-vf').onchange = e => { const f = e.target.files[0]; if (!f) return; S.vfile = f; S.vid = ''; q('.ic-vn').textContent = f.name; preview('.ic-vv', f); if (!q('.ic-name').value) q('.ic-name').value = nm(f); };
+    if (!tg) {
+      q('.ic-rv').onloadedmetadata = e => { const d = e.target.duration; if (isFinite(d)) q('.ic-rlen').textContent = `Длина этого видео: ${d.toFixed(2).replace('.', ',')} с. Всё, что идёт после выбранной длины, отрезается.`; };
+      q('.ic-rf').onchange = e => { const f = e.target.files[0]; if (!f) return; S.rfile = f; S.rid = ''; q('.ic-rn').textContent = f.name; preview('.ic-rv', f); };
+      q('.ic-rlib').onclick = () => pickLib((it, label) => { S.rid = it.id; S.rfile = null; q('.ic-rn').textContent = label; preview('.ic-rv', it.url); });
+    }
+    q('.ic-lib').onclick = () => pickLib((it, label) => { S.vid = it.id; S.vfile = null; q('.ic-vn').textContent = label; preview('.ic-vv', it.url); if (!q('.ic-name').value) q('.ic-name').value = 'icon'; });
+    const pickLib = done => {
       const items = LIB.filter(it => it.kind !== 'image' && !it.missing && it.url).sort((a, b) => b.date - a.date).slice(0, 80);
       let p = $('#icLibM'); if (!p) { p = document.createElement('div'); p.className = 'modal'; p.id = 'icLibM'; p.style.zIndex = 60; document.body.append(p); }
       p.hidden = false;
@@ -13807,7 +13900,7 @@ window.needs = (() => {
       p.onclick = e => {
         if (e.target === p || e.target.closest('[data-x]')) { p.hidden = true; return; }
         const b = e.target.closest('[data-id]'); if (!b) return; const it = items.find(x => x.id === b.dataset.id); if (!it) return;
-        S.vid = it.id; S.vfile = null; q('.ic-vn').textContent = 'Выбрано: ' + (it.prompt || it.sub || 'видео').slice(0, 50); if (!q('.ic-name').value) q('.ic-name').value = 'icon'; p.hidden = true;
+        done(it, 'Выбрано: ' + (it.prompt || it.sub || 'видео').slice(0, 50)); p.hidden = true;
       };
     };
 
@@ -13839,21 +13932,23 @@ window.needs = (() => {
     q('.ic-go').onclick = async () => {
       if (S.busy) return;
       if (!tg && !on('.ic-o-png') && !on('.ic-o-sprite') && !on('.ic-o-webp')) { setSt('Отметьте, что сохранить.'); return; }
-      if (S.src === 'image' && !S.img) { setSt('Добавьте картинку.'); return; }
+      if (S.src !== 'video' && !S.img) { setSt('Добавьте картинку.'); return; }
+      if (S.src === 'motion' && !S.rid && !S.rfile) { setSt('Выберите видео с движениями.'); return; }
       if (S.src === 'image' && !q('.ic-prompt').value.trim()) { setSt('Вставьте промпт для H3.'); q('.ic-prompt').focus(); return; }
       if (S.src === 'video' && !S.vid && !S.vfile) { setSt('Выберите видео.'); return; }
       await loadInfo(); if (!S.info.comfy || !S.info.local) { setSt('ComfyUI не готов, см. подсказку вверху.'); return; }
       if (missingNow()) { setSt('Ещё не всё установлено: посмотрите карточку «Что нужно для работы» вверху страницы.'); q('.ic-note').scrollIntoView({ block: 'center' }); return; }
       S.busy = true; q('.ic-go').disabled = true; q('.ic-open').hidden = true; q('.ic-res').innerHTML = ''; q('.ic-helpbox').hidden = true;
       try {
-        setSt(S.src === 'image' ? 'Идёт: видео из картинки, потом вырезка фона. Ход работы виден в очереди.' : 'Вырезаю фон. Ход работы виден в очереди.');
+        setSt(S.src === 'motion' ? 'Идёт: персонаж повторяет движения из видео, потом вырезка фона. Ход работы виден в очереди.' : S.src === 'image' ? 'Идёт: видео из картинки, потом вырезка фона. Ход работы виден в очереди.' : 'Вырезаю фон. Ход работы виден в очереди.');
         const fd = new FormData(); fd.append('src', S.src);
-        if (S.src === 'image') fd.append('file', S.img, S.img.name); else if (S.vid) fd.append('id', S.vid); else fd.append('file', S.vfile, S.vfile.name);
+        if (S.src === 'motion') { fd.append('file', S.img, S.img.name); if (S.rid) fd.append('refid', S.rid); else fd.append('ref', S.rfile, S.rfile.name); fd.append('room', on('.ic-room') ? '1' : '0'); fd.append('mlen', q('.ic-mlen').value.trim()); }
+        else if (S.src === 'image') fd.append('file', S.img, S.img.name); else if (S.vid) fd.append('id', S.vid); else fd.append('file', S.vfile, S.vfile.name);
         Object.entries({ prompt: q('.ic-prompt').value.trim(), duration: tg ? '3' : (q('.ic-dur').value || '3'), vsize: q('.ic-q').value, bg: q('.ic-bg').value, cutbg: on('.ic-cutbg') ? '1' : '0',
           method: S.method, edge: q('.ic-edge').value, threshold: q('.ic-th').value, r_erode: q('.ic-er').value, r_dilate: q('.ic-di').value,
           despill: on('.ic-despill') ? '1' : '0', loop: on('.ic-loop') ? '1' : '0', key: q('.ic-key').value, name: q('.ic-name').value.trim(),
           size: tg ? '0' : q('.ic-size').value, png: !tg && on('.ic-o-png') ? '1' : '0', sprite: !tg && on('.ic-o-sprite') ? '1' : '0', webp: !tg && on('.ic-o-webp') ? '1' : '0',
-          telegram: tg ? '1' : '0', cols: tg ? '0' : (q('.ic-cols').value || '0'), step: tg ? '1' : q('.ic-step').value }).forEach(([a, b]) => fd.append(a, b));
+          telegram: tg ? '1' : '0', cols: tg ? '0' : (q('.ic-cols').value || '0'), step: tg ? '1' : q('.ic-step').value, count: tg ? '0' : (q('.ic-count').value || '0'), fast: tg ? '' : q('.ic-fast').value.trim() }).forEach(([a, b]) => fd.append(a, b));
         const j = await postForm('/api/icons/run', fd); qAdd(j.prompt_id, 'icons', (tg ? 'Стикер Telegram: ' : 'Анимация: ') + (q('.ic-name').value.trim() || 'без названия'));
         const ev = await waitEv(j); setSt('Готово. Файлы лежат в папке результатов и в Библиотеке.'); show(ev);
       } catch (er) { setSt('Не получилось: ' + (er.message || er)); }

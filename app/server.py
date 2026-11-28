@@ -89,6 +89,23 @@ def _ssl_context():
     return ctx
 
 
+
+def thin_frames(folder, name, total, count, loop):
+    """Keeps `count` of the `total` frames name_0001.png..., evenly spread, and renumbers them from 1. A loop does not repeat its first pose
+    at the end; a single movement (a strike) keeps both the first and the last frame. Returns the kept indices (from 0)."""
+    if loop or count == 1:
+        chosen = [i * total // count for i in range(count)]
+    else:
+        chosen = [round(i * (total - 1) / (count - 1)) for i in range(count)]
+    keep = set(chosen)
+    for i in range(total):
+        if i not in keep:
+            (folder / f"{name}_{i + 1:04d}.png").unlink(missing_ok=True)
+    for new, old in enumerate(chosen, 1):
+        if new != old + 1:
+            (folder / f"{name}_{old + 1:04d}.png").replace(folder / f"{name}_{new:04d}.png")
+    return chosen
+
 class AuthNeeded(Exception):
     pass
 
@@ -4689,7 +4706,7 @@ class App:
         """True / False for each node the page needs; None when ComfyUI does not answer."""
         out = {}
         for cls in ("RMBG", "MatAnyone2", "LoopCleanup", "TelegramStickerWebM", "ImageBlur", "GrowMask",
-                    "JoinImageWithAlpha", "LoadVideo", "MiniMaxH3ImageToVideo"):
+                    "JoinImageWithAlpha", "LoadVideo", "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "VHS_LoadVideo"):
             try:
                 status, d = await self.comfy_json("GET", f"/object_info/{cls}", timeout=aiohttp.ClientTimeout(total=15))
                 out[cls] = status == 200 and isinstance(d, dict) and cls in d
@@ -4856,24 +4873,73 @@ class App:
                 "png": want["png"] or want["sprite"], "webp": want["webp"], "telegram": want["telegram"],
                 "r_erode": num("r_erode", 0, 0, 20), "r_dilate": num("r_dilate", 0, 0, 20)}
         graph, stages = wf.icons_graph(res["name"], opts)
-        icons = {"run": run, "name": name, "folder": folder, "step": num("step", 1, 1, 12), "cols": num("cols", 0, 0, 40), "fps": 24.0, "w": w, "h": h, **want}
+        count = num("count", 0, 0, 200)
+        if count and want["webp"]:
+            graph, stages = wf.icons_graph(res["name"], dict(opts, png=True))   # the WEBP with the chosen number of frames is put together from the PNG frames
+        icons = {"run": run, "name": name, "folder": folder, "step": num("step", 1, 1, 12), "cols": num("cols", 0, 0, 40), "fps": 24.0, "w": w, "h": h,
+                 "count": count, "loop": opts["loop"], **want}
         sub = {"green": "по зелёному", "rmbg": "RMBG", "matanyone": "MatAnyone"}[method]
         return await self.queue(graph, stages, {"mode": "icons", "sub": "Анимированные иконки · " + sub, "prompt": name, "aspect": "", "q": "",
                                                 "len": float((item or {}).get("len") or 0), "res": f"{w}×{h}" if w else (item or {}).get("res", ""),
                                                 "seed": 0, "icons": icons})
 
+    @staticmethod
+    def video_seconds(ff, content, ext):
+        """The length of a video in seconds (0 when it cannot be read)."""
+        import subprocess, tempfile
+        tmp = Path(tempfile.gettempdir()) / f"h3s_len_{uuid.uuid4().hex[:8]}{ext}"
+        try:
+            tmp.write_bytes(content)
+            r = subprocess.run([ff, "-hide_banner", "-i", str(tmp)], capture_output=True, timeout=30, creationflags=engine.CREATE_NO_WINDOW)
+            m = re.search(rb"Duration:\s*(\d+):(\d+):([\d.]+)", r.stderr)
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0
+        except Exception:
+            return 0
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def add_room(ff, content, ext, dims):
+        """The hero gets smaller inside the same frame (80%), so a jump or a kick does not leave it. The added edges take the colour
+        of the picture's corner (transparent stays transparent). Returns the PNG bytes."""
+        import subprocess, tempfile
+        run = uuid.uuid4().hex[:8]
+        src, dst = (Path(tempfile.gettempdir()) / f"h3s_room_{run}{s}" for s in (f".{ext}", "_out.png"))
+        try:
+            src.write_bytes(content)
+            px = subprocess.run([ff, "-v", "error", "-i", str(src), "-vf", "format=rgba,crop=1:1:4:4", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
+                                capture_output=True, timeout=30, creationflags=engine.CREATE_NO_WINDOW).stdout
+            if len(px) < 4:
+                raise RuntimeError("no pixel")
+            color = "black@0" if px[3] < 128 else f"0x{px[0]:02x}{px[1]:02x}{px[2]:02x}"
+            w, h = dims
+            sw, sh = round(w * 0.8), round(h * 0.8)
+            vf = f"format=rgba,scale={sw}:{sh}:flags=lanczos,pad={w}:{h}:{(w - sw) // 2}:{round((h - sh) * 0.75)}:color={color},format=rgba"
+            subprocess.run([ff, "-v", "error", "-y", "-i", str(src), "-vf", vf, "-frames:v", "1", str(dst)],
+                           capture_output=True, timeout=60, creationflags=engine.CREATE_NO_WINDOW, check=True)
+            return dst.read_bytes()
+        except Exception:
+            raise web.HTTPBadRequest(text="Не удалось добавить место вокруг персонажа. Сохраните картинку в PNG или JPG либо снимите галочку «Свободное место».")
+        finally:
+            src.unlink(missing_ok=True)
+            dst.unlink(missing_ok=True)
+
     async def h_icons_run(self, req):
         """Animated icons: runs the user's own finished graph (see workflows.icons_api_graph). One job: picture -> video -> cut-out -> files."""
-        form, content, fname, vcontent, vname = {}, None, "", None, ""
+        form, content, fname, ref, rname = {}, None, "", None, ""
         async for part in await req.multipart():
             if part.name == "file":
                 fname = part.filename or ""
                 content = bytes(await part.read())
+            elif part.name == "ref":
+                rname = part.filename or ""
+                ref = bytes(await part.read())
             else:
                 form[part.name] = (await part.text()).strip()
         if self.rh():
             raise web.HTTPBadRequest(text="Анимированные иконки работают только с локальным ComfyUI.")
         mode = "video" if form.get("src") == "video" else "image"
+        motion = form.get("src") == "motion"   # picture + a video whose movements the hero repeats, then the same cut-out
         item = None
         if mode == "video":
             if content is None:
@@ -4899,7 +4965,16 @@ class App:
         if not any(want.values()):
             raise web.HTTPBadRequest(text="Отметьте, что сохранить: кадры PNG, спрайт-лист, WEBP или стикер Telegram")
         prompt = form.get("prompt", "").strip()
-        if mode == "image" and not prompt:
+        if motion:
+            await self.need_models("refs")
+            if ref is None:
+                item = self.library.get(form.get("refid", ""))
+                if not item or item.get("kind") == "image":
+                    raise web.HTTPBadRequest(text="Выберите видео с движениями")
+                ref = await self.item_bytes(item)
+                rname = "ref." + (item.get("ext") or "mp4")
+                item = None
+        elif mode == "image" and not prompt:
             raise web.HTTPBadRequest(text="Напишите, что должен делать персонаж")
         try:
             base = json.loads((ROOT / "icon_nodes" / "icons_workflow_api.json").read_text(encoding="utf-8"))
@@ -4920,6 +4995,31 @@ class App:
         finally:
             tmp.unlink(missing_ok=True)
 
+        seconds = min(10.0, max(3.0, float(form.get("duration") or 3)))
+        keep = 0
+        if motion:   # the length of the result is the length of the motion video (or the shorter one typed on the page), up to 10 s
+            if not dims[0]:
+                raise web.HTTPBadRequest(text="Не удалось прочитать картинку. Сохраните её в PNG или JPG и загрузите снова.")
+            length = await asyncio.to_thread(self.video_seconds, ff, ref, Path(rname).suffix or ".mp4")
+            try:
+                typed = float((form.get("mlen") or "0").replace(",", "."))
+            except ValueError:
+                raise web.HTTPBadRequest(text="Длину напишите числом, например 1,3")
+            if typed > 0:
+                length = min(typed, length) if length else typed
+            if length:
+                length = min(10.0, max(0.2, length))
+                seconds = max(3.0, length)   # the model makes at least 3 s; what is longer than the motion is cut off after it
+                keep = max(5, round(length * wf.FPS))
+                if keep >= wf.frames(seconds):
+                    keep = 0
+            if form.get("room", "1") == "1":
+                content = await asyncio.to_thread(self.add_room, ff, content, ext, dims)
+                ext = "png"
+
+        def even32(k):   # MiniMax H3 needs both sides divisible by 32, otherwise the sampler fails («shape ... is invalid»)
+            return tuple(max(64, round(d * k / 32) * 32) for d in dims)
+
         def scaled(side):
             if not side or not dims[0]:
                 return None
@@ -4929,17 +5029,15 @@ class App:
         if mode == "image" and form.get("vsize") and form["vsize"] != "pic":
             lim = num("vsize", 768, 128, 2048)
             if dims[0]:
-                k = min(1.0, lim / max(dims))
-                vs = (max(64, round(dims[0] * k)), max(64, round(dims[1] * k)))
+                vs = even32(min(1.0, lim / max(dims)))
         elif mode == "image" and dims[0]:
-            k = min(1.0, 768 / max(dims))
-            vs = (max(64, round(dims[0] * k)), max(64, round(dims[1] * k)))   # «as the picture», but not bigger than 768: H3 is slow above that
+            vs = even32(min(1.0, 768 / max(dims)))   # «as the picture», but not bigger than 768: H3 is slow above that
         side = num("size", 0, 0, 2048)
         sz = scaled(side)
         name = re.sub(r"[^\w\-]+", "_", form.get("name") or Path(fname).stem or (item or {}).get("prompt", "")[:30] or "icon", flags=re.UNICODE).strip("_")[:40] or "icon"
         run = uuid.uuid4().hex[:8]
         folder = f"{name}_{run}"
-        o = {"mode": mode, "prompt": prompt, "seconds": min(10.0, max(3.0, float(form.get("duration") or 3))), "seed": random.randrange(2 ** 50),
+        o = {"mode": mode, "prompt": prompt, "seconds": seconds, "seed": random.randrange(2 ** 50),
              "vsize": vs, "bg": form.get("bg", "") if form.get("bg") in ("green", "pink", "blue", "white", "gray", "black") else "", "cutbg": form.get("cutbg") == "1",
              "method": method, "edge": num("edge", -2, -8, 4), "threshold": num("threshold", 2, 1, 20) / 100, "r_erode": num("r_erode", 0, 0, 20),
              "r_dilate": num("r_dilate", 0, 0, 20), "despill": form.get("despill", "1") == "1", "loop": form.get("loop", "1") == "1", "key": form.get("key", "green"),
@@ -4951,6 +5049,26 @@ class App:
         if status != 200:
             raise web.HTTPBadGateway(text="Не удалось передать файл в ComfyUI")
         o["image" if mode == "image" else "video"] = res["name"]
+        if motion:
+            fd = aiohttp.FormData()
+            fd.add_field("image", ref, filename=f"h3s_m_{run}{Path(rname).suffix.lower()[:6] or '.mp4'}", content_type="application/octet-stream")
+            fd.add_field("type", "input")
+            status, res = await self.comfy_json("POST", "/upload/image", data=fd)
+            if status != 200:
+                raise web.HTTPBadGateway(text="Не удалось передать видео с движениями в ComfyUI")
+            o["motion"] = {"models": self.model_names, "video": res["name"], "prompt": wf.icons_motion_prompt(prompt), "width": vs[0], "height": vs[1], "keep": keep}
+            if not o["bg"]:
+                o["bg"] = "green"   # a transparent picture needs a flat background for the video
+        count = num("count", 0, 0, 200)
+        fast = 0.0   # «по изображению»: the whole movement is squeezed into this many seconds (0: the speed stays as made)
+        if mode == "image" and not motion:
+            try:
+                fast = float((form.get("fast") or "0").replace(",", "."))
+            except ValueError:
+                raise web.HTTPBadRequest(text="Время ускорения напишите числом, например 1 или 1,5")
+            fast = min(10.0, max(0.5, fast)) if fast > 0 else 0.0
+        if (count or fast) and want["webp"]:
+            o["png"] = True
         graph, stages, need = wf.icons_api_graph(base, o)
         for n in graph.values():   # the saved graph pins video-encoder options ('none' is not accepted by every ComfyUI): leave them out, the node uses its own defaults
             if n.get("class_type") == "CreateVideo":
@@ -4968,9 +5086,9 @@ class App:
                 missing.append(cls)
         if missing:
             hints = {"RMBG": "ComfyUI-RMBG", "MatAnyone2": "ComfyUI-MatAnyone (FuouM)", "LoopCleanup": "кнопка «Скачать и установить всё» на странице",
-                     "TelegramStickerWebM": "кнопка «Скачать и установить всё» на странице", "GLSLShader": "обновите ComfyUI", "ComfySwitchNode": "обновите ComfyUI"}
+                     "TelegramStickerWebM": "кнопка «Скачать и установить всё» на странице", "GLSLShader": "обновите ComfyUI", "VHS_LoadVideo": "ComfyUI-VideoHelperSuite, ставится через ComfyUI Manager", "ComfySwitchNode": "обновите ComfyUI"}
             raise web.HTTPBadRequest(text="В вашем ComfyUI нет нод: " + "; ".join(f"{c}" + (f" ({hints[c]})" if c in hints else "") for c in missing))
-        if mode == "image":
+        if mode == "image" and not motion:
             for cls, field, key in (("UNETLoader", "unet_name", "105:6"), ("LoraLoaderModelOnly", "lora_name", "105:121"), ("CLIPLoader", "clip_name", "105:13"),
                                     ("VAELoader", "vae_name", "105:11")):
                 have = await self.comfy_choices(cls, field)
@@ -4985,10 +5103,10 @@ class App:
             if alt:
                 graph["105:24"]["inputs"]["vae_name"] = alt
         icons = {"run": run, "name": name, "folder": folder, "step": num("step", 1, 1, 12), "cols": num("cols", 0, 0, 40), "fps": 24.0,
-                 "w": sz[0] if sz else 0, "h": sz[1] if sz else 0, "src": mode, **want}
+                 "w": sz[0] if sz else 0, "h": sz[1] if sz else 0, "src": "motion" if motion else mode, "count": count, "loop": o["loop"], "fast": fast, **want}
         sub = {"green": "по зелёному", "rmbg": "RMBG", "matanyone": "MatAnyone"}[method]
         return await self.queue(graph, stages, {"mode": "icons", "sub": "Анимированные иконки · " + sub, "prompt": name, "aspect": "", "q": "",
-                                                "len": float(o["seconds"]) if mode == "image" else float((item or {}).get("len") or 0),
+                                                "len": keep / wf.FPS if keep else float(o["seconds"]) if mode == "image" else float((item or {}).get("len") or 0),
                                                 "res": f"{vs[0]}×{vs[1]}" if vs else "", "seed": o["seed"], "icons": icons})
 
     async def comfy_choices(self, cls, field, strict=False):
@@ -5122,9 +5240,20 @@ class App:
             name, made = ic["name"], []
             for i, f in enumerate(frames, 1):
                 await fetch(f, frames_dir / f"{name}_{i:04d}.png")
+            fps, count, picked = float(ic.get("fps") or 24), int(ic.get("count") or 0), False
+            total, fast = len(frames), float(ic.get("fast") or 0)
+            if total and (count or fast):
+                # `count`: only this many frames, evenly over the whole movement; `fast`: the whole movement plays in this many seconds
+                length = total / fps
+                dur = min(fast, length) if fast else length
+                keep = min(total, count or (max(2, round(dur * fps)) if fast else total))
+                if keep < total or dur < length:
+                    chosen = thin_frames(frames_dir, name, total, keep, bool(ic.get("loop")) or bool(fast))
+                    frames = [frames[i] for i in chosen]
+                    fps, picked = keep / dur, True
             if ic.get("sprite") and frames:
                 ff = self.ffmpeg()
-                step = max(1, int(ic.get("step") or 1))
+                step = 1 if int(ic.get("count") or 0) else max(1, int(ic.get("step") or 1))
                 sel = len(range(0, len(frames), step))
                 cols = int(ic.get("cols") or 0) or math.ceil(math.sqrt(sel))
                 cols = max(1, min(cols, sel))
@@ -5144,10 +5273,25 @@ class App:
                     else:
                         fw, fh = (sw, sh) if sw and sh else self.png_size(frames_dir / f"{name}_0001.png")
                         info = {"frames": sel, "columns": cols, "rows": rows, "frame_width": fw, "frame_height": fh,
-                                "fps": round(float(ic.get("fps") or 24) / step, 2), "sheet_width": fw * cols, "sheet_height": fh * rows}
+                                "fps": round(fps / step, 2), "sheet_width": fw * cols, "sheet_height": fh * rows}
                         (dest / f"{name}_спрайт-лист.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
                         made.append((sheet, "image", f"Спрайт-лист {cols}×{rows}, кадр {fw}×{fh}"))
-            if ic.get("webp") and webp:
+            if ic.get("webp") and picked:
+                p = dest / f"{name}.webp"
+                ff = self.ffmpeg()
+                sw, sh = int(ic.get("w") or 0), int(ic.get("h") or 0)
+                err = b"no ffmpeg"
+                if ff:
+                    proc = await asyncio.create_subprocess_exec(
+                        ff, "-hide_banner", "-v", "error", "-y", "-framerate", f"{fps:.4f}", "-i", str(frames_dir / f"{name}_%04d.png"),
+                        "-vf", (f"scale={sw}:{sh}:flags=lanczos," if sw and sh else "") + "format=bgra", "-c:v", "libwebp_anim", "-lossless", "1", "-loop", "0", str(p),
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, creationflags=engine.CREATE_NO_WINDOW)
+                    _, err = await proc.communicate()
+                if p.exists() and p.stat().st_size:
+                    made.append((p, "image", "Анимированный WEBP"))
+                else:
+                    notes.append("WEBP не собран: " + err.decode("utf-8", "ignore")[-200:].strip())
+            elif ic.get("webp") and webp:
                 p = dest / f"{name}.webp"
                 await fetch(webp, p)
                 made.append((p, "image", "Анимированный WEBP"))
@@ -5160,11 +5304,11 @@ class App:
                     made.append((p, "video", "Стикер Telegram WebM"))
                 else:
                     notes.append("Стикер Telegram: файл не найден в папке результатов ComfyUI.")
-            vid = next((f for f in mine if f["filename"].lower().endswith((".mp4", ".webm")) and not f["filename"].startswith("sticker_")), None) if ic.get("src") == "image" else None
+            vid = next((f for f in mine if f["filename"].lower().endswith((".mp4", ".webm")) and not f["filename"].startswith("sticker_")), None) if ic.get("src") in ("image", "motion") else None
             if vid:   # the video H3 made from the picture: it goes to the Library too
                 p = dest / f"{name}_видео{Path(vid['filename']).suffix}"
                 await fetch(vid, p)
-                made.append((p, "video", "Видео из картинки (исходник)"))
+                made.append((p, "video", "Видео с повторёнными движениями (исходник)" if ic.get("src") == "motion" else "Видео из картинки (исходник)"))
             if ic.get("png") and frames:
                 made.append((frames_dir / f"{name}_0001.png", "image", f"Кадры PNG: {len(frames)} шт. (папка «кадры»)"))
             elif frames_dir.exists():
@@ -6018,38 +6162,26 @@ class App:
 
     async def h_llmapi_get(self, _req):
         c = self.config.get("llm_api") or {}
-        return web.json_response({"on": bool(c.get("on")), "svc": c.get("svc") or "openrouter", "model": c.get("model") or "", "url": c.get("url") or "",
-                                  "has_key": bool(c.get("key")), "ready": bool(self.remote()),
+        got = llmapi.profiles(self.config.data)
+        return web.json_response({"on": bool(c.get("on")), "current": llmapi.active_id(self.config.data, got), "ready": bool(self.remote()),
+                                  "profiles": [{"id": p["id"], "name": p.get("name") or llmapi.title_of(p), "svc": p.get("svc") or "openrouter",
+                                                "model": p.get("model") or "", "url": p.get("url") or "", "has_key": bool(p.get("key"))} for p in got],
                                   "services": {k: {"title": v[0], "model": v[2], "keyurl": v[3]} for k, v in llmapi.SERVICES.items()}})
 
     async def h_llmapi_set(self, req):
         b = await req.json()
-        c = dict(self.config.get("llm_api") or {})
-        if b.get("clear"):
-            c = {}
-        else:
-            if b.get("svc") in llmapi.SERVICES:
-                c["svc"] = b["svc"]
-            for k in ("model", "url"):
-                if k in b:
-                    c[k] = str(b[k]).strip()[:300]
-            key = str(b.get("key") or "").strip()
-            if key:
-                c["key"] = llmapi.protect(key)
-            if "on" in b:
-                c["on"] = bool(b["on"])
-        self.config.update(llm_api=c)
+        try:
+            c, got = llmapi.change(self.config.data, b, uuid.uuid4().hex[:8])
+        except ValueError as e:
+            raise web.HTTPBadRequest(text=str(e))
+        self.config.update(llm_api=c, llm_profiles=got)
         return await self.h_llmapi_get(req)
 
     async def h_llmapi_test(self, req):
         b = await req.json()
-        c = dict(self.config.get("llm_api") or {})
-        c.update(on=True)
-        for k in ("svc", "model", "url"):
-            if b.get(k):
-                c[k] = str(b[k]).strip()
-        if str(b.get("key") or "").strip():
-            c["key"] = llmapi.protect(str(b["key"]).strip())
+        old = next((p for p in llmapi.profiles(self.config.data) if p["id"] == b.get("id")), None)
+        c = llmapi.draft(old, {k: v for k, v in b.items() if v})
+        c["on"] = True
         conn = llmapi.settings(c)
         if not conn:
             return web.json_response({"ok": False, "error": "Заполните ключ" + (" и адрес сервиса с названием модели." if c.get("svc") == "other" else ".")})

@@ -2397,6 +2397,20 @@ def icons_video_graph(m, unet, lora, prompt, width, height, seconds, seed, image
     return g, stages
 
 
+def icons_motion_prompt(extra=""):
+    """«Repeat the movements of a video»: the hero comes from the picture, only the motion from the reference video."""
+    extra = (extra or "").strip()
+    return ("For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced. "
+            "<Video 1> is used only as a motion reference.\n\n"
+            "integrated_multimodal_description: [Shot 1] Game character animation. The character from <Picture 1> (same face, body, hair, "
+            "clothes, colours and art style) performs exactly the body movements, poses, turns, jumps and strikes of the figure in <Video 1>, "
+            "with the same timing and in the same direction. Only the motion is taken from <Video 1>: never show the figure of <Video 1>, "
+            "its body, face, clothes, colours or background. The background stays the flat solid colour of <Picture 1>, no floor, no shadows. "
+            "The camera is completely static, the whole body stays inside the frame. Only one character."
+            + (" " + extra if extra else "")
+            + "\n\noverall_soundscape: N/A\n\nnon_diegetic_music: N/A")
+
+
 def icons_api_graph(base, o):
     """The user's own, finished ComfyUI graph (her two workflows «WebP Loop» + «WebM Telegram», exported in API format and merged): nothing is rebuilt,
     only her switches and inputs are set. o: mode ('image' | 'video'), image / video (file in ComfyUI's input), prompt, seconds, seed, vsize (W, H or None =
@@ -2461,6 +2475,25 @@ def icons_api_graph(base, o):
     for i in out["image"] + out["video"]:
         if want.get(i) is not True:
             g.pop(i, None)
+    mo = o.get("motion") if o["mode"] == "image" else None
+    if mo:   # the video is made by the references graph (picture + motion video) instead of «picture -> video»
+        rg, rstages = ref_graph(mo["models"], mo["prompt"], mo["width"], mo["height"], float(o["seconds"]), int(o["seed"]),
+                                ["-"], [mo["video"]], [], steps=6, ref_size="match")
+        rg.pop("18", None)
+        rg.pop("100", None)   # the picture comes from the page's own picture steps (node 163: background, size)
+        rg["110"]["inputs"].update(custom_width=mo["width"], frame_load_cap=frames(float(o["seconds"])))
+        for n in rg.values():
+            for key, v in n["inputs"].items():
+                if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str):
+                    n["inputs"][key] = ["163", 0] if v[0] == "100" else ["mo:" + v[0], v[1]]
+        for n in g.values():
+            for key, v in n["inputs"].items():
+                if v == ["105:91", 0]:
+                    n["inputs"][key] = ["mo:17", 0]
+        g.update({"mo:" + k: n for k, n in rg.items()})
+        if mo.get("keep"):   # a motion video shorter than the model can make: only its own frames go on, the invented rest is dropped
+            g["mo:trim"] = {"class_type": "ImageFromBatch", "inputs": {"image": g["mo:17"]["inputs"]["images"], "batch_index": 0, "length": int(mo["keep"])}}
+            g["mo:17"]["inputs"]["images"] = ["mo:trim", 0]
     # what really runs: everything upstream of the kept outputs
     need, stack = set(), [i for i in want if want[i] and i in g]
     while stack:
@@ -2475,6 +2508,9 @@ def icons_api_graph(base, o):
              "105:10": "decode", "105:23": "decode", "105:91": "save", "92": "save", "131": "decode", "189": "decode", "132": "upscale", "190": "upscale",
              "218": "upscale", "226": "upscale", "219": "sample2", "227": "sample2", "133": "save", "137": "save", "191": "save", "192": "save",
              "242": "save", "245": "save"}
+    if mo:
+        stage.update({"mo:" + k: v for k, v in rstages.items()})
+        stage["mo:trim"] = "decode"
     stages = {i: stage[i] for i in need if i in stage}
     return g, stages, need
 

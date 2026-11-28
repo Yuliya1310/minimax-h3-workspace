@@ -20,7 +20,7 @@ except ImportError:  # not Windows (tests)
 from version import APP_VERSION
 
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-SECRET_KEYS = {"rh_key", "rh_instance", "rh_workflow_id", "rh_host"}
+SECRET_KEYS = {"rh_key", "rh_instance", "rh_workflow_id", "rh_host", "llm_api", "llm_profiles", "comfy_key"}
 WEBVIEW2_ID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 
